@@ -5,6 +5,7 @@
 #include "live-census.h"
 #include "live-counters.h"
 #include "live-trace.h"
+#include "local-platform.h"
 #include "native-resource-state.h"
 #include "async-upload.h"
 #include "parallel-pages.h"
@@ -1338,6 +1339,18 @@ void BufferCache::GrowBdaTable(uint64_t entries) {
 	std::fflush(stdout);
 }
 
+// The image upload ring (host memory): 1 GiB with 24 GiB of RAM or more (a 32 GB PC reports ~31 GiB), 512 MiB below.
+// A frame where the game streams in an area uploads 0.8-1.4 GB of textures; past the ring's size the render thread
+// waited for the GPU to finish the first copies before it could reuse the ring (60-80 ms of gpu_wait in those frames,
+// Boletaria). KYTY_STAGING_RING_MB=<n> (128-4096): n MiB, for an A/B.
+static uint64_t StagingRingSize() {
+	if (const char* text = std::getenv("KYTY_STAGING_RING_MB"); text != nullptr) {
+		const uint64_t mib = std::strtoull(text, nullptr, 10);
+		if (mib >= 128 && mib <= 4096) return mib * MiB;
+	}
+	return LocalPlatform::PhysicalMemory() >= (uint64_t {24} << 30u) ? 1024 * MiB : 512 * MiB;
+}
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache,
                          GpuResourceManager* resources)
@@ -1345,7 +1358,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, GdsBufferSize),
       m_lod_stats_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, 256 * 16),
       m_memory_tracker(page_manager),
-      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, 512 * MiB,
+      m_staging_buffer(graphics, scheduler, MemoryUsage::Upload, StagingRingSize(),
                        AllFlags | vk::BufferUsageFlagBits::eShaderDeviceAddress),
       m_stream_buffer(graphics, scheduler, MemoryUsage::Stream, 64 * MiB),
       m_host_shader_upload(graphics, scheduler, MemoryUsage::Upload, 64 * MiB),
