@@ -1,5 +1,6 @@
 #include "frame-gen.h"
 #include "frame-gen-hudless.h"
+#include "frame-gen-upscale.h"
 
 #include "common/logging/log.h"
 #include "local-platform.h"
@@ -52,6 +53,7 @@ struct Sources {
 
 int      g_generate    = 0;     // frames to generate per rendered frame (0 = off)
 bool     g_ready       = false; // Streamline loaded and the feature available
+bool     g_streamline  = false; // Streamline loaded, for DLSS-G or DLSS super resolution (frame-gen-upscale.h)
 Camera   g_camera;              // Kyty.Gpu: the current guest frame
 Sources  g_sources;             // Kyty.Gpu: the current guest frame
 uint64_t g_guest_frame = 0;     // Kyty.Gpu
@@ -400,6 +402,10 @@ bool Requested() {
 	return g_generate > 0;
 }
 
+bool StreamlineLoaded() {
+	return g_streamline;
+}
+
 std::string SupportProblem(vk::PhysicalDevice physical_device) {
 	if (g_generate == 0) {
 		return {};
@@ -467,7 +473,7 @@ bool WantsCamera() {
 void BypassCommandHooks(vk::Device device) {
 #ifdef KYTY_FRAMEGEN_STREAMLINE
 	// KYTY_FRAMEGEN_HOOKS=1 keeps Streamline's wrappers (for comparison).
-	if (g_generate == 0 || std::getenv("KYTY_FRAMEGEN_HOOKS") != nullptr) {
+	if (!g_streamline || std::getenv("KYTY_FRAMEGEN_HOOKS") != nullptr) {
 		return;
 	}
 	// The real loader: Streamline itself forwards to it.
@@ -500,7 +506,8 @@ void BypassCommandHooks(vk::Device device) {
 void Initialize() {
 	const char* value = std::getenv("KYTY_FRAMEGEN");
 	g_generate        = value != nullptr ? std::clamp(std::atoi(value), 0, 5) : 0;
-	if (g_generate == 0) {
+	InitializeUpscale();
+	if (g_generate == 0 && !UpscaleWantsStreamline()) {
 		return;
 	}
 #ifdef KYTY_FRAMEGEN_STREAMLINE
@@ -581,6 +588,12 @@ void Initialize() {
 		if (text.find("reflex") != std::string::npos) features.push_back(sl::kFeatureReflex);
 		if (text.find("pcl") != std::string::npos) features.push_back(sl::kFeaturePCL);
 	}
+	// DLSS super resolution (frame-gen-upscale.h): its plugin next to frame generation's, whose set is loaded
+	// without frame generation all the same (DLSS-G then stays off): with the DLSS plugin alone the emulator
+	// closed as the device was made (the fork's e945401b).
+	if (UpscaleWantsStreamline()) {
+		features.push_back(sl::kFeatureDLSS);
+	}
 	sl::Preferences           preferences {};
 	preferences.showConsole        = false;
 	preferences.logLevel           = std::getenv("KYTY_FRAMEGEN_VERBOSE") ? sl::LogLevel::eVerbose
@@ -603,6 +616,7 @@ void Initialize() {
 		g_generate = 0;
 		return;
 	}
+	g_streamline = true;
 	// SDL loads the interposer as the Vulkan loader: every instance/device/swapchain call then
 	// goes through Streamline, which adds what DLSS-G needs.
 	SetEnvironmentVariableW(L"SDL_VULKAN_LIBRARY", interposer.c_str());

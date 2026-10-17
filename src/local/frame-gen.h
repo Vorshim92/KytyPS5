@@ -63,12 +63,14 @@ struct FrameInputs {
 	bool          valid       = false;
 };
 
-// Process start, before the window: loads Streamline when KYTY_FRAMEGEN is set (it then becomes
-// SDL's Vulkan loader, and so the proxy of instance, device and swapchain calls).
+// Process start, before the window: loads Streamline when KYTY_FRAMEGEN is set, or DLSS super resolution is asked for
+// (frame-gen-upscale.h; it then becomes SDL's Vulkan loader, and so the proxy of instance, device and swapchain calls).
 void Initialize();
-// After Initialize: Streamline is loaded (device creation then adds what it relies on but does
-// not add itself, VK_KHR_present_id for its VK_NV_low_latency2).
+// After Initialize: Streamline is loaded for frame generation.
 [[nodiscard]] bool Requested();
+// After Initialize: Streamline is loaded, for DLSS-G or for DLSS super resolution alone (frame-gen-upscale.h): device
+// creation then adds what it relies on but does not add itself, VK_KHR_present_id for its VK_NV_low_latency2.
+[[nodiscard]] bool StreamlineLoaded();
 // Before the device is created: why Streamline says DLSS-G cannot run with this GPU, driver and Windows (e.g.
 // hardware-accelerated GPU scheduling turned off), logged; empty when it can, or when frame generation is off. A refused
 // device's error repeats it.

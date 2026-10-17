@@ -392,6 +392,8 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/frame-gen.cpp"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.h"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.cpp"
+	"${KYTY_SOURCE_DIR}/local/frame-gen-upscale.h"
+	"${KYTY_SOURCE_DIR}/local/frame-gen-upscale.cpp"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.cpp"
 	"${KYTY_SOURCE_DIR}/local/resource-plan-serial.h"
@@ -852,6 +854,11 @@ if (WIN32)
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
 		             INCLUDE_DIRECTORIES "${KYTY_STREAMLINE_SDK}/include")
 		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen.cpp" APPEND PROPERTY
+		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_STREAMLINE=1)
+		# (DLSS super resolution through the same Streamline: src/local/frame-gen-upscale.cpp.)
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen-upscale.cpp" APPEND PROPERTY
+		             INCLUDE_DIRECTORIES "${KYTY_STREAMLINE_SDK}/include")
+		set_property(SOURCE "${KYTY_SOURCE_DIR}/local/frame-gen-upscale.cpp" APPEND PROPERTY
 		             COMPILE_DEFINITIONS KYTY_FRAMEGEN_STREAMLINE=1)
 	endif()
 endif()

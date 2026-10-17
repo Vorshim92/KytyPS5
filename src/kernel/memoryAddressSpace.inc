@@ -2493,6 +2493,15 @@ private:
 			default: return PAGE_NOACCESS;
 		}
 	}
+
+	// NVIDIA's NGX takes host address space as the Vulkan device is made: for DLSS frame generation (KYTY_FRAMEGEN) and
+	// for DLSS super resolution without it (KYTY_UPSCALE=dlss, src/local/frame-gen-upscale.h).
+	static bool NvidiaNgxWanted() {
+		const char* framegen = std::getenv("KYTY_FRAMEGEN");
+		const char* upscale  = std::getenv("KYTY_UPSCALE");
+		return (framegen != nullptr && std::atoi(framegen) > 0) ||
+		       (upscale != nullptr && std::strcmp(upscale, "dlss") == 0);
+	}
 #endif
 
 	void ReserveGuestRegions() {
@@ -2502,8 +2511,8 @@ private:
 		auto               guest_end         = HOST_USER_MAX + 1u;
 		auto               next_addr         = HOST_SYSTEM_MANAGED_MIN;
 		// KYTY_RESERVE_CEILING=<hex>: stop below it, leaving the top of the 40-bit range to the
-		// driver. DLSS frame generation (KYTY_FRAMEGEN) needs it: NVIDIA's optical flow and NGX
-		// interop reserve about 44 GiB of host address space below 1 TiB when the device is
+		// driver. DLSS (frame generation or super resolution: NvidiaNgxWanted) needs it: NVIDIA's
+		// optical flow and NGX interop reserve about 44 GiB of host address space below 1 TiB when the device is
 		// created, and fail it (VK_ERROR_INITIALIZATION_FAILED) when the guest took all of it.
 		// With frame generation the guest stops at 512 GiB (its mappings take the lowest free
 		// addresses, tens of GiB above HOST_USER_MIN): a ceiling of 0xE0_0000_0000 left an RTX 5090
@@ -2511,20 +2520,19 @@ private:
 		uint64_t ceiling = 0;
 		if (const char* value = std::getenv("KYTY_RESERVE_CEILING"); value != nullptr && *value != '\0') {
 			ceiling = std::strtoull(value, nullptr, 16);
-		} else if (const char* framegen = std::getenv("KYTY_FRAMEGEN"); framegen != nullptr && std::atoi(framegen) > 0) {
+		} else if (NvidiaNgxWanted()) {
 			ceiling = 0x8000000000ull;
 		}
 		if (ceiling != 0) {
 			guest_end = std::clamp<uint64_t>(ceiling, HOST_USER_MIN, guest_end);
 		}
-		// KYTY_FG_ADDRESS_HOLE=0|1 (default 1 with frame generation): 64 GiB right above the guest held free until the
+		// KYTY_FG_ADDRESS_HOLE=0|1 (default 1 with DLSS): 64 GiB right above the guest held free until the
 		// Vulkan device is made (ReleaseFrameGenAddressHole). The executable is not randomized (/DYNAMICBASE:NO), so the
 		// process's allocations after the guest's take the lowest free addresses one after another, from the guest's end
 		// up: on an RTX 5080 the device creation with frame generation failed (VK_ERROR_INITIALIZATION_FAILED) until the
 		// user turned on bottom-up address randomization for the emulator in Windows' exploit protection (issue #45),
 		// which scatters them. (The size NVIDIA's interop reserved below 1 TiB on the 5090: about 44 GiB.)
-		if (const char* framegen = std::getenv("KYTY_FRAMEGEN");
-		    framegen != nullptr && std::atoi(framegen) > 0 && guest_end <= (uint64_t {1} << 40u) - FrameGenHoleSize) {
+		if (NvidiaNgxWanted() && guest_end <= (uint64_t {1} << 40u) - FrameGenHoleSize) {
 			const char* hole = std::getenv("KYTY_FG_ADDRESS_HOLE");
 			if (hole == nullptr || *hole != '0') {
 				g_frame_gen_hole = VirtualAlloc(reinterpret_cast<void*>(guest_end), FrameGenHoleSize, MEM_RESERVE,

@@ -40,6 +40,7 @@
 #include "loader/systemContent.h"
 #include "local-platform.h"
 #include "frame-gen.h"
+#include "frame-gen-upscale.h"
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
@@ -1497,9 +1498,9 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
-		// KYTY_FRAMEGEN: Streamline enables VK_NV_low_latency2 (Reflex) without the present-id
-		// extension it requires; current drivers then refuse the device.
-		if (FrameGen::Requested() && HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
+		// KYTY_FRAMEGEN or DLSS super resolution alone: Streamline enables VK_NV_low_latency2 (Reflex)
+		// without the present-id extension it requires; current drivers then refuse the device.
+		if (FrameGen::StreamlineLoaded() && HasExtension(available_extensions, VK_KHR_PRESENT_ID_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
 		}
 		AddPipelineBinaryExtensions(available_extensions, device_extensions);
@@ -1524,6 +1525,11 @@ void WindowContext::CreateVulkan() {
 			     "frame generation (launcher: Frame generation -> Off). KYTY_FRAMEGEN_VERBOSE=1 logs why the driver "
 			     "refused it.%s\n",
 			     frame_gen_problem.empty() ? "" : ": ", frame_gen_problem.c_str(), FrameGen::RefusedDeviceAdvice().c_str());
+		}
+		if (FrameGen::StreamlineLoaded()) {
+			EXIT("Could not create the Vulkan device with DLSS super resolution (NVIDIA Streamline): start without it "
+			     "(KYTY_UPSCALE unset). KYTY_FRAMEGEN_VERBOSE=1 logs why the driver refused it.%s\n",
+			     FrameGen::RefusedDeviceAdvice().c_str());
 		}
 		EXIT("Could not create device");
 	}
@@ -1557,6 +1563,7 @@ void WindowContext::CreateVulkan() {
 		DeviceFault::NoteQueue(graphic_ctx.readback_queue, "readback");
 	}
 	Libs::Graphics::FrameGen::OnDevice(graphic_ctx.instance, graphic_ctx.physical_device, graphic_ctx.device);
+	Libs::Graphics::FrameGen::UpscaleOnDevice(graphic_ctx.physical_device);
 
 	if (!graphic_ctx.CreateAllocator()) {
 		EXIT("Could not create Vulkan memory allocator");
