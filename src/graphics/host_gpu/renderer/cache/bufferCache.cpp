@@ -1444,11 +1444,11 @@ void BufferCache::GrowBdaTable(uint64_t entries) {
 // The image upload ring (host memory): 1 GiB with 24 GiB of RAM or more (a 32 GB PC reports ~31 GiB), 512 MiB below.
 // A frame where the game streams in an area uploads 0.8-1.4 GB of textures; past the ring's size the render thread
 // waited for the GPU to finish the first copies before it could reuse the ring (60-80 ms of gpu_wait in those frames,
-// Boletaria). KYTY_STAGING_RING_MB=<n> (128-4096): n MiB, for an A/B.
+// Boletaria). KYTY_STAGING_RING_MB=<n> (128-1024, the most maxBufferSize guarantees): n MiB, for an A/B.
 static uint64_t StagingRingSize() {
 	if (const char* text = std::getenv("KYTY_STAGING_RING_MB"); text != nullptr) {
 		const uint64_t mib = std::strtoull(text, nullptr, 10);
-		if (mib >= 128 && mib <= 4096) return mib * MiB;
+		if (mib >= 128 && mib <= 1024) return mib * MiB;
 	}
 	return LocalPlatform::PhysicalMemory() >= (uint64_t {24} << 30u) ? 1024 * MiB : 512 * MiB;
 }
