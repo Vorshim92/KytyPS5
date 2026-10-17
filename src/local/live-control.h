@@ -108,7 +108,8 @@ inline void Flip() {
 		using C = LiveCounters::Id;
 		static constexpr std::array counted {C::XprStores, C::XprStored, C::XprStorePending, C::XprRefuseBind,
 		                                     C::XprMissRefused, C::XprMissValidate, C::XprMissUnseen, C::XprMissBudget,
-		                                     C::UploadBytes, C::AsyncImageBytes, C::FullUploadBytes,
+		                                     C::UploadBytes, C::AsyncImageBytes, C::FullUploadBytes, C::UploadCallUs,
+		                                     C::SparseUploadPieces,
 		                                     C::BufferRegistrations, C::RegionSyncs, C::SyncDownloads, C::AsyncReadbacks,
 		                                     C::ReadbackParts, C::ReadbackRegions, C::GuestCommands, C::TextureUnmaps, C::AsyncPipelines,
 		                                     C::TableDraws, C::TableStores, C::TableStoreVariant, C::TableStoreTargets,
