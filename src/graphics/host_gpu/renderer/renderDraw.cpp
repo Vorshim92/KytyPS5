@@ -1660,8 +1660,8 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 	};
 	if (flip_slot >= 0) {
-		FrameGen::BeforeFlipDraw(buffer, rendering, state.color_info[flip_slot], static_cast<uint32_t>(flip_slot),
-		                         bindings.pixel->images, emit_draw);
+		FrameGen::BeforeFlipDraw(buffer, rendering, state, static_cast<uint32_t>(flip_slot), bindings.pixel->images,
+		                         emit_draw);
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	if (!record_draw) {

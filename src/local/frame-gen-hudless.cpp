@@ -6,8 +6,10 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -308,13 +310,19 @@ bool IsFlipTarget(uint64_t address) {
 	return !g_taken.load(std::memory_order_relaxed) && IsFlipAddress(address);
 }
 
-void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const RenderColorInfo& target, uint32_t slot,
+void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const DrawRenderState& state, uint32_t slot,
                     std::span<const TextureBinding> images, const std::function<void()>& redraw) {
 	auto& cache = command.GetContext().GetTextureCache();
-	auto* flip  = cache.TryGetImage(target.image_id);
+	auto* flip  = cache.TryGetImage(state.color_info[slot].image_id);
 	++g_stats.composites;
-	// Drawn twice, the pass may write nothing but the flip image, whose copy alone undoes the first draw.
-	if (flip == nullptr || rendering.num_color_attachments != 1 || slot != 0 ||
+	// Drawn twice, the draw may write nothing but the flip image, whose copy alone undoes the first draw: no other
+	// attachment, no buffer or storage image its shaders write.
+	const bool writes = HasShaderBufferWrites(state.vs_input_info.stage) ||
+	                    (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) ||
+	                    std::any_of(images.begin(), images.end(), [](const TextureBinding& binding) {
+		                    return binding.desc.type == TextureCache::BindingType::Storage;
+	                    });
+	if (flip == nullptr || writes || rendering.num_color_attachments != 1 || slot != 0 ||
 	    rendering.depth_stencil_attachment.image_view != nullptr || !IsCopyable(flip->backing)) {
 		++g_stats.refused;
 		return;

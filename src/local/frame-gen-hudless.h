@@ -17,6 +17,7 @@
 #include <span>
 
 namespace Libs::Graphics {
+struct DrawRenderState;
 struct RenderColorInfo;
 struct RenderState;
 struct TextureBinding;
@@ -38,10 +39,11 @@ void InitializeHudless();
 // Renderer thread (Kyty.Gpu), normal draw path, while HudlessCapturing(). FlipSlot: the draw counted for its first
 // target (the HUD texture guess), and the slot of `targets` that is a recent flip image while this frame's composite
 // is still to come (-1: none). Such a draw is recorded directly and stored for neither the table nor the native XPR
-// path. BeforeFlipDraw, with everything of it bound and before its render pass begins: `redraw` (the draw) once more
-// without the HUD texture (one of `images`), its result kept, then the flip image and the HUD texture as they were.
+// path. BeforeFlipDraw, with everything of the draw (`state`) bound and before its render pass begins: `redraw` (the
+// draw) once more without the HUD texture (one of `images`), its result kept, then the flip image and the HUD texture
+// as they were.
 [[nodiscard]] int FlipSlot(std::span<const RenderColorInfo> targets);
-void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const RenderColorInfo& target, uint32_t slot,
+void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const DrawRenderState& state, uint32_t slot,
                     std::span<const TextureBinding> images, const std::function<void()>& redraw);
 // Any translating thread (the table and native XPR paths), while HudlessCapturing(): `address` is a recent flip
 // image's and this frame's composite is still to come (the draw is left to the normal path).
