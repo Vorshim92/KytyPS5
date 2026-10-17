@@ -5028,11 +5028,13 @@ void TextureCache::RunGarbageCollector() {
 	// Further past that, younger images go and more of them a flip: 1 GiB over, 300 flips and 80; 2 GiB over, 120
 	// flips and 160. Images unused for 600 flips came at 40 a flip while the use stayed past the budget, where Windows
 	// moves the game's memory out of video memory: a 16 GB card with a 10 GB budget climbed to 13.5 GB in Boletaria,
-	// and a Discord stream that lowered the budget by 1.5 GB left the use 1-1.5 GB over it (12-30 fps).
+	// and a Discord stream that lowered the budget by 1.5 GB left the use 1-1.5 GB over it (12-30 fps). (Not with
+	// KYTY_GC_LIVE_BUDGET: its trigger is an early start, gigabytes below the budget.)
 	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
 	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
 	constexpr uint64_t GiB           = uint64_t {1} << 30u;
-	const uint64_t     over          = m_total_used_memory > collect_above ? m_total_used_memory - collect_above : 0;
+	const bool         past          = !KytyGcLiveBudget() && m_total_used_memory > collect_above;
+	const uint64_t     over          = past ? m_total_used_memory - collect_above : 0;
 	const bool         failing       = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;
 	const uint64_t     stale_ticks   = failing           ? FailedRetryTicks
 	                                   : over >= 2 * GiB ? 120
