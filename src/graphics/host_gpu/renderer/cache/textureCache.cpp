@@ -4484,18 +4484,28 @@ void TextureCache::RunGarbageCollector() {
 	// system has left went under 2 GiB or back (checked every 60 flips; issue #47: "the emulator uses all 32 GB of my
 	// RAM", with spiky frame times, and nothing in its log said how much it held).
 	LogPcMemory(tick);
-	// Over the budget: the images no draw or dispatch used for StaleTicks flips (~10 s), least recently used first, at
-	// most MaxDeletions a flip. What the game stops drawing it stops binding: 1-1 standing, 3.2 GiB of images were used
-	// in the last 2 flips, 3.0 GiB not for 160 and more, 0.05 GiB in between; turning the camera, images behind it
-	// come back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low 47 -> 27 fps).
-	constexpr uint64_t StaleTicks   = 600;
-	constexpr size_t   MaxDeletions = 40;
-	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
-	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
-	const bool     failing     = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;
-	const uint64_t stale_ticks = failing ? FailedRetryTicks : StaleTicks;
+	// Over the budget: the images no draw or dispatch used for stale_ticks flips (600, ~10 s), least recently used
+	// first, at most max_deletions a flip (40). What the game stops drawing it stops binding: 1-1 standing, 3.2 GiB of
+	// images were used in the last 2 flips, 3.0 GiB not for 160 and more, 0.05 GiB in between; turning the camera,
+	// images behind it come back after a few seconds (160 flips: 5-7 MB of uploads a frame instead of 0.2-1.7, 1% low
+	// 47 -> 27 fps).
+	constexpr uint64_t StaleTicks = 600;
 	// Less the room game buffers in use that got system memory need back (BufferCache::MoveSpilledBufferBack).
 	const uint64_t collect_above = m_trigger_gc_memory - std::min(m_trigger_gc_memory, m_buffer_cache.SpilledRoom());
+	// Further past that, younger images go and more of them a flip: 1 GiB over, 300 flips and 80; 2 GiB over, 120
+	// flips and 160. Images unused for 600 flips came at 40 a flip while the use stayed past the budget, where Windows
+	// moves the game's memory out of video memory: a 16 GB card with a 10 GB budget climbed to 13.5 GB in Boletaria,
+	// and a Discord stream that lowered the budget by 1.5 GB left the use 1-1.5 GB over it (12-30 fps).
+	// For a while after the GPU could not make an image (InsertImage), images unused for FailedRetryTicks go too: the
+	// superseded ones whose memory it needs (issue #49: a 16 GB GPU full of texture-pool images).
+	constexpr uint64_t GiB           = uint64_t {1} << 30u;
+	const uint64_t     over          = m_total_used_memory > collect_above ? m_total_used_memory - collect_above : 0;
+	const bool         failing       = m_failed_tick != 0 && tick < m_failed_tick + StaleTicks;
+	const uint64_t     stale_ticks   = failing           ? FailedRetryTicks
+	                                   : over >= 2 * GiB ? 120
+	                                   : over >= GiB     ? 300
+	                                                     : StaleTicks;
+	const size_t       max_deletions = over >= 2 * GiB ? 160 : over >= GiB ? 80 : 40;
 	if (m_total_used_memory < collect_above || tick < stale_ticks) {
 		return;
 	}
@@ -4509,7 +4519,7 @@ void TextureCache::RunGarbageCollector() {
 	// mode, its images unable to go to system memory).
 	const uint64_t       download_max = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download).Size() / 2;
 	std::vector<ImageId> candidates;
-	candidates.reserve(MaxDeletions);
+	candidates.reserve(max_deletions);
 	m_lru_cache.ForEachItemBelow(tick - stale_ticks, [&](ImageId id) {
 		const auto* owner = m_slot_images.try_get(id);
 		if (owner == nullptr || !owner->registered || owner->depth_id ||
@@ -4518,7 +4528,7 @@ void TextureCache::RunGarbageCollector() {
 			return false;
 		}
 		candidates.push_back(id);
-		return candidates.size() == MaxDeletions;
+		return candidates.size() == max_deletions;
 	});
 	for (const auto id: candidates) {
 		auto owner = m_slot_images.try_get(id);
