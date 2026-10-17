@@ -472,6 +472,47 @@ public:
 		return true;
 	}
 
+	// As BackingPieces for a range with unmapped parts: a hole is a (null, bytes) piece. False if no part of the range
+	// is mapped or a mapping's backing is out of range (TryReadSparseBacking's checks).
+	bool SparseBackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces) {
+		pieces.clear();
+		if (!IsAvailable() || size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		auto       lock  = MapReadLock();
+		const auto end   = vaddr + size;
+		auto       first = m_maps.lower_bound(vaddr);
+		if (first != m_maps.begin()) {
+			auto previous = std::prev(first);
+			if (previous->second.vaddr + previous->second.size > vaddr) {
+				first = previous;
+			}
+		}
+		uint64_t current = vaddr;
+		for (auto mapping = first; mapping != m_maps.end() && mapping->second.vaddr < end; ++mapping) {
+			const auto& entry  = mapping->second;
+			const auto  start  = std::max(vaddr, entry.vaddr);
+			const auto  bytes  = std::min(end, entry.vaddr + entry.size) - start;
+			const auto  offset = entry.backing_offset + start - entry.vaddr;
+			if (!RangeOk(offset, bytes)) {
+				pieces.clear();
+				return false;
+			}
+			if (start > current) {
+				pieces.emplace_back(nullptr, start - current);
+			}
+			pieces.emplace_back(m_backing_base + offset, bytes);
+			current = start + bytes;
+		}
+		if (current == vaddr) {
+			return false;
+		}
+		if (current < end) {
+			pieces.emplace_back(nullptr, end - current);
+		}
+		return true;
+	}
+
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!IsAvailable() || data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
@@ -1683,6 +1724,9 @@ public:
 	}
 	bool BackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces) {
 		return m_backing->BackingPieces(vaddr, size, pieces);
+	}
+	bool SparseBackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces) {
+		return m_backing->SparseBackingPieces(vaddr, size, pieces);
 	}
 
 	bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
