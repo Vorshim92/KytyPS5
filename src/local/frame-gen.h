@@ -53,9 +53,13 @@ struct FrameInputs {
 	Camera        camera;
 	uint64_t      guest_frame = 0;
 	bool          motion_attachment = false; // the motion copy is a color attachment too
-	// KYTY_FG_HUDLESS (frame-gen-hudless.h): the game image without its HUD, its pixels as the frame image's.
+	// KYTY_FG_HUDLESS (frame-gen-hudless.h): the game image without its HUD, its pixels as the frame image's, and
+	// laid out as the backbuffer (the present's, DLSS-G's HUD-less color).
 	std::unique_ptr<VulkanImage> hudless;
-	bool                         has_hudless = false;
+	VulkanImage                  hudless_display;
+	vk::ImageView                hudless_display_view = nullptr;
+	bool                         has_hudless          = false;
+	bool                         has_hudless_display  = false;
 	bool          valid       = false;
 };
 

@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
 #include <array>
@@ -165,6 +166,17 @@ void Delete(GraphicContext& graphics, std::unique_ptr<VulkanImage>& image) {
 		graphics.DeleteImage(*image);
 	}
 	image.reset();
+}
+
+void DestroyDisplay(GraphicContext& graphics, FrameInputs& inputs) {
+	if (inputs.hudless_display_view != nullptr) {
+		graphics.device.destroyImageView(inputs.hudless_display_view, nullptr);
+		inputs.hudless_display_view = nullptr;
+	}
+	if (inputs.hudless_display.image != nullptr) {
+		graphics.DeleteImage(inputs.hudless_display);
+	}
+	inputs.has_hudless_display = false;
 }
 
 // A texture cache image's barrier state as it was, put back once its copies are done.
@@ -400,7 +412,8 @@ void PrepareHudless(FrameInputs& inputs, const Image& flip) {
 	g_draws.clear();
 	// The composite drawn into this flip image goes with a frame DLSS-G generates from: the frame's image and the
 	// capture's trade places (the frame's former one, idle since the frame was acquired, takes the next capture).
-	inputs.has_hudless = taken && inputs.valid && g_capture != nullptr && g_capture_flip == address;
+	inputs.has_hudless         = taken && inputs.valid && g_capture != nullptr && g_capture_flip == address;
+	inputs.has_hudless_display = false;
 	if (inputs.has_hudless) {
 		std::swap(inputs.hudless, g_capture);
 	}
@@ -414,7 +427,58 @@ void PrepareHudless(FrameInputs& inputs, const Image& flip) {
 	}
 }
 
+void ScaleHudless(GraphicContext& graphics, vk::CommandBuffer command, FrameInputs& inputs, vk::Extent2D backbuffer,
+                  vk::Rect2D region, vk::Format format) {
+	inputs.has_hudless_display = false;
+	if (!inputs.valid || !inputs.has_hudless) {
+		return;
+	}
+	auto& source  = *inputs.hudless;
+	auto& display = inputs.hudless_display;
+	// At the backbuffer's size and in its format (one made for another went with the swapchain's recreation, which
+	// waited for its queues).
+	if (display.image == nullptr || display.format != format || display.extent.width != backbuffer.width ||
+	    display.extent.height != backbuffer.height) {
+		DestroyDisplay(graphics, inputs);
+		Create(graphics, display, format, vk::Extent3D {backbuffer.width, backbuffer.height, 1},
+		       vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled);
+		vk::ImageViewCreateInfo view {};
+		view.image            = display.image;
+		view.viewType         = vk::ImageViewType::e2D;
+		view.format           = format;
+		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(graphics.device.createImageView(&view, nullptr, &inputs.hudless_display_view),
+		                     "HUD-less image view");
+	}
+	Transition(command, source, vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+	           vk::PipelineStageFlagBits2::eTransfer);
+	Transition(command, display, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+	           vk::PipelineStageFlagBits2::eTransfer);
+	// Where RecordPresentCommands put the frame image, black around it as there.
+	if (region.offset.x != 0 || region.offset.y != 0 || region.extent != backbuffer) {
+		const vk::ClearColorValue       black {std::array<float, 4> {0.0f, 0.0f, 0.0f, 1.0f}};
+		const vk::ImageSubresourceRange whole {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		command.clearColorImage(display.image, vk::ImageLayout::eTransferDstOptimal, &black, 1, &whole);
+		Transition(command, display, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite,
+		           vk::PipelineStageFlagBits2::eTransfer);
+	}
+	vk::ImageBlit blit {};
+	blit.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(source.extent.width),
+	                                    static_cast<int32_t>(source.extent.height), 1};
+	blit.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+	blit.dstOffsets[0]  = vk::Offset3D {region.offset.x, region.offset.y, 0};
+	blit.dstOffsets[1]  = vk::Offset3D {region.offset.x + static_cast<int32_t>(region.extent.width),
+	                                    region.offset.y + static_cast<int32_t>(region.extent.height), 1};
+	command.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal, display.image,
+	                  vk::ImageLayout::eTransferDstOptimal, 1, &blit, vk::Filter::eLinear);
+	Transition(command, display, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+	           vk::PipelineStageFlagBits2::eAllCommands);
+	inputs.has_hudless_display = true;
+}
+
 void DestroyHudlessInputs(GraphicContext& graphics, FrameInputs& inputs) {
+	DestroyDisplay(graphics, inputs);
 	Delete(graphics, inputs.hudless);
 	inputs.has_hudless = false;
 }
