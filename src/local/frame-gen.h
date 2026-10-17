@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 
@@ -52,6 +53,9 @@ struct FrameInputs {
 	Camera        camera;
 	uint64_t      guest_frame = 0;
 	bool          motion_attachment = false; // the motion copy is a color attachment too
+	// KYTY_FG_HUDLESS (frame-gen-hudless.h): the game image without its HUD, its pixels as the frame image's.
+	std::unique_ptr<VulkanImage> hudless;
+	bool                         has_hudless = false;
 	bool          valid       = false;
 };
 

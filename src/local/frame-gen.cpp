@@ -1,4 +1,5 @@
 #include "frame-gen.h"
+#include "frame-gen-hudless.h"
 
 #include "common/logging/log.h"
 #include "local-platform.h"
@@ -622,6 +623,7 @@ void OnDevice(vk::Instance instance, vk::PhysicalDevice physical_device, vk::Dev
 		LOGF("frame generation: slReflexSetOptions failed (%d)\n", static_cast<int>(result));
 	}
 	g_ready = true;
+	InitializeHudless();
 	LOGF("frame generation: DLSS-G ready\n");
 	std::printf("Frame generation: DLSS-G ready (%d generated frame(s) per frame)\n", g_generate);
 	std::fflush(stdout);
@@ -983,6 +985,7 @@ void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs) {
 			graphics.DeleteImage(*image);
 		}
 	}
+	DestroyHudlessInputs(graphics, inputs);
 	inputs.valid = false;
 }
 
