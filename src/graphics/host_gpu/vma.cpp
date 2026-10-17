@@ -73,6 +73,17 @@ bool GraphicContext::CreateAllocator() {
 	if (memory_budget_ext_enabled) {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 	}
+	// KYTY_VMA_BLOCK_MB=<n> (1-4096, for an A/B): VMA's memory blocks of n MiB instead of its 256. A block stays
+	// allocated while any allocation in it lives: at Boletaria 21 blocks of 256 MiB held 2.7 GB free around a few live
+	// allocations each (11.9 GB held, 8.9 in use); 64 MiB blocks hold less around each straggler. VMA gives a resource
+	// over half a block memory of its own: smaller blocks mean more allocations, each a kernel call.
+	if (const char* text = std::getenv("KYTY_VMA_BLOCK_MB"); text != nullptr) {
+		const uint64_t block_mb = std::strtoull(text, nullptr, 10);
+		if (block_mb > 0 && block_mb <= 4096) {
+			info.preferredLargeHeapBlockSize = block_mb << 20u;
+			std::printf("Video memory: allocator blocks of %" PRIu64 " MiB (KYTY_VMA_BLOCK_MB)\n", block_mb);
+		}
+	}
 	// KYTY_VRAM_LIMIT_MB=<n>: video memory as on a GPU with n MiB (VMA's heap size limit): its budget,
 	// and allocations past it failing, for tests of memory pressure on smaller GPUs.
 	std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> heap_limits {};
