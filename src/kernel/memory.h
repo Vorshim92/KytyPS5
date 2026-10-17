@@ -139,6 +139,8 @@ bool                   WriteGuestRanges(const char* path);
 bool                   GuestRangeAccess(uint64_t vaddr, uint64_t size, bool* gpu, bool* cpu_write);
 // The same for a range that spans mappings: one (pointer, bytes) piece per mapping, in order.
 bool TryGetBackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces);
+// The same for a range with unmapped parts: a hole is a (null, bytes) piece. False if no part of it is mapped.
+bool TryGetSparseBackingPieces(uint64_t vaddr, uint64_t size, std::vector<std::pair<const uint8_t*, uint64_t>>& pieces);
 bool                   TryReadGpuCleanBackingToHost(uint64_t vaddr, void* data, uint64_t size);
 // Avoid false-sharing read faults only when exact ownership proves clean.
 bool TryReadGpuCleanBackingOnWatchedPage(uint64_t vaddr, void* data, uint64_t size);
