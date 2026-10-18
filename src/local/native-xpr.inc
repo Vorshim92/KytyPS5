@@ -3109,8 +3109,9 @@ bool RenderExecutor::NativeXprEmitTargets(const NativeXprDrawState& draw_state, 
 // now), and a newer image with the same backing as a target is what the registers now select: the
 // normal path captures the state again.
 bool RenderExecutor::NativeXprTargetsCurrent(const NativeXprDrawState& draw_state) {
-	// KYTY_FG_HUDLESS: the game's composite into the flip image is drawn on the normal path (frame-gen-hudless.h).
-	if (FrameGen::HudlessCapturing())
+	// KYTY_FG_HUDLESS, KYTY_UPSCALE: the game's composite into the flip image is drawn on the normal path
+	// (frame-gen-hudless.h).
+	if (FrameGen::CompositeCapturing())
 		for (const auto& target: draw_state.targets)
 			if (FrameGen::IsFlipTarget(target.requested.data.address)) return false;
 	auto&      textures = m_context.GetTextureCache();
@@ -3312,10 +3313,10 @@ bool RenderExecutor::NativeXprEmit(CommandBuffer& buffer, NativeXprRecord& recor
 	emit.index_base  = index_base;
 	emit.index_bytes = index_bytes;
 	emit.index_type  = index_type;
-	// KYTY_FRAMEGEN: the camera, which the normal path's draw hook reads from the G-buffer vertex
+	// KYTY_FRAMEGEN, KYTY_UPSCALE: the camera, which the normal path's draw hook reads from the G-buffer vertex
 	// shader's SRT. Without it frames drawn from records had no generated frames (and were not
 	// capped by KYTY_FLIP_RATE).
-	if (FrameGen::Enabled() && record.stage_count > 0 && record.stages[0].program != nullptr) {
+	if (FrameGen::Capturing() && record.stage_count > 0 && record.stages[0].program != nullptr) {
 		FrameGen::OnDraw(record.stages[0].program->shader_hash, record.stages[0].flattened);
 	}
 	return true;

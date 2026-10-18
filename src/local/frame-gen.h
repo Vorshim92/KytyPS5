@@ -85,6 +85,9 @@ void OnDevice(vk::Instance instance, vk::PhysicalDevice physical_device, vk::Dev
 // (disabled here) go straight to the driver.
 void BypassCommandHooks(vk::Device device);
 [[nodiscard]] bool Enabled();
+// The camera and the TAA pass's images are gathered, for DLSS-G (Enabled) or for the upscaler (frame-gen-upscale.h):
+// the TAA dispatch and the frame's first G-buffer draw go the normal way, whose hooks read them.
+[[nodiscard]] bool Capturing();
 
 // Present thread, around vkQueuePresentKHR of the image showing `inputs` (null: a frame
 // without inputs, e.g. a menu). `backbuffer` is the swapchain extent, `region` the part the
@@ -117,12 +120,17 @@ void NoteScene();
 // The current guest frame has no camera yet: its next G-buffer draw goes the normal way (the table way's draws have
 // no constants on the CPU), whose hook reads it.
 [[nodiscard]] bool WantsCamera();
+// The current guest frame's camera so far (not valid before its first G-buffer draw).
+[[nodiscard]] const Camera& CurrentCamera();
 void OnDraw(uint64_t vs_hash, std::span<const uint32_t> flattened_srt);
 void OnDispatch(uint64_t cs_hash, ImageId depth, uint64_t depth_address, ImageId motion,
                 uint64_t motion_address);
 // At the guest flip, in the frame's command buffer: copy the gathered images into `inputs`.
 void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer& command,
                    FrameInputs& inputs);
+// At the guest flip without DLSS-G but Capturing() (PrepareInputs takes a frame's camera and TAA images with it): the
+// next frame's are gathered anew.
+void NewGuestFrame();
 void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs);
 
 } // namespace FrameGen

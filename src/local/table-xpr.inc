@@ -540,9 +540,9 @@ RenderExecutor::TableResult RenderExecutor::TableTry(CommandBuffer& buffer, std:
 		TableReset(pair);
 	}
 	if (pair.refused) return Spec::Refuse("table: pair refused"), TableResult::Native;
-	// KYTY_FRAMEGEN: the frame's first G-buffer draw goes the normal way (or a native record's), whose hook reads the
-	// camera from its constants (a speculation's thread leaves them all to the GPU thread's).
-	if (FrameGen::Enabled() && pair.programs[0] != nullptr &&
+	// KYTY_FRAMEGEN, KYTY_UPSCALE: the frame's first G-buffer draw goes the normal way (or a native record's), whose
+	// hook reads the camera from its constants (a speculation's thread leaves them all to the GPU thread's).
+	if (FrameGen::Capturing() && pair.programs[0] != nullptr &&
 	    FrameGen::IsGbufferVertexShader(pair.programs[0]->shader_hash) && (Role() != 0 || FrameGen::WantsCamera()))
 		return Spec::Refuse("table: frame generation camera"), TableResult::Native;
 	// A store at most once a frame per pair and draw state, within the frame's budget (kyty_local_table_store_budget):
@@ -2484,9 +2484,9 @@ bool RenderExecutor::TableDispatch(CommandBuffer& buffer, uint32_t groups_x, uin
 	// (The game's 3D view; a dispatch declined below goes the normal way, which notes it too.)
 	if (Role() == 0 && pair.programs[0] != nullptr && FrameGen::IsTaaShader(pair.programs[0]->shader_hash))
 		FrameGen::NoteScene();
-	// KYTY_FRAMEGEN: the TAA dispatch goes the normal way, whose hook reads its depth and motion-vector images (all
-	// dispatches did: +3 ms a frame at 1-1).
-	if (FrameGen::Enabled() && pair.programs[0] != nullptr && FrameGen::IsTaaShader(pair.programs[0]->shader_hash))
+	// KYTY_FRAMEGEN, KYTY_UPSCALE: the TAA dispatch goes the normal way, whose hook reads its depth and motion-vector
+	// images (all dispatches did: +3 ms a frame at 1-1).
+	if (FrameGen::Capturing() && pair.programs[0] != nullptr && FrameGen::IsTaaShader(pair.programs[0]->shader_hash))
 		return m_dispatch_declined = "dispatch: frame generation inputs", false;
 	TablePrefetchPair(pair);
 	if (Role() == 0) pair.used_frame = m_context.FrameNumber();

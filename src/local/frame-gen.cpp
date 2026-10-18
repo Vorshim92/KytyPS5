@@ -398,6 +398,10 @@ bool Enabled() {
 	return g_ready;
 }
 
+bool Capturing() {
+	return g_ready || UpscaleCapturing();
+}
+
 bool Requested() {
 	return g_generate > 0;
 }
@@ -467,7 +471,11 @@ std::string RefusedDeviceAdvice() {
 }
 
 bool WantsCamera() {
-	return g_ready && !g_camera.valid;
+	return Capturing() && !g_camera.valid;
+}
+
+const Camera& CurrentCamera() {
+	return g_camera;
 }
 
 void BypassCommandHooks(vk::Device device) {
@@ -677,6 +685,8 @@ void BeforePresent(const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2
 	g_run_with    = usable ? g_run_with + 1 : 0;
 	g_run_without = usable ? 0 : g_run_without + 1;
 	const bool mode_on = g_mode_on ? g_run_without < TurnOffAfter : g_run_with >= TurnOnAfter;
+	// (The options and the frame token with the renderer thread's DLSS calls, one at a time: frame-gen-upscale.h.)
+	StreamlineGuard streamline;
 	// DLSS-G options: on while frames carry inputs; sizes are hints for its allocations.
 	if (!g_options_set || g_options_format != format || mode_on != g_mode_on ||
 	    (usable && (g_options_backbuffer != backbuffer || g_options_render != inputs->render_extent))) {
@@ -710,11 +720,12 @@ void BeforePresent(const FrameInputs* inputs, vk::Extent2D backbuffer, vk::Rect2
 		}
 	}
 
-	++g_frame_index;
+	g_frame_index = NextStreamlineFrame();
 	if (g_api.get_new_frame_token(g_token, &g_frame_index) != sl::Result::eOk || g_token == nullptr) {
 		g_token = nullptr;
 		return;
 	}
+	streamline.Release(); // (Reflex's sleep below waits)
 	auto& token = *g_token;
 	// The frame's Reflex sleep, then its markers (all at its present: the game's frame was made before).
 	if (g_api.reflex_sleep != nullptr && kyty_local_framegen_sleep.load(std::memory_order_relaxed) != 0)
@@ -874,9 +885,12 @@ void AfterPresent() {
 		return;
 	}
 	sl::DLSSGState state {};
+	// (With the renderer thread's DLSS calls, one at a time: frame-gen-upscale.h.)
+	StreamlineGuard streamline;
 	if (g_api.dlssg_get_state(sl::ViewportHandle {0}, state, nullptr) != sl::Result::eOk) {
 		return;
 	}
+	streamline.Release();
 	g_presented_frames.store(std::max(state.numFramesActuallyPresented, 1u), std::memory_order_relaxed);
 	// More generated frames asked for than the GPU makes (the launcher's 3x and up): as many as it makes.
 	if (state.numFramesToGenerateMax != 0 && static_cast<uint32_t>(g_generate) > state.numFramesToGenerateMax) {
@@ -907,6 +921,8 @@ void SwapchainChanging() {
 	options.mode                = sl::DLSSGMode::eOff;
 	options.flags               = sl::DLSSGFlags::eRetainResourcesWhenOff;
 	options.numFramesToGenerate = static_cast<uint32_t>(g_generate);
+	// (With the renderer thread's DLSS calls, one at a time: frame-gen-upscale.h.)
+	const StreamlineGuard streamline;
 	if (const auto result = g_api.dlssg_set_options(sl::ViewportHandle {0}, options); result != sl::Result::eOk)
 		LOGF("frame generation: slDLSSGSetOptions (off) failed (%d)\n", static_cast<int>(result));
 	g_mode_on     = false;
@@ -1013,6 +1029,12 @@ void PrepareInputs(GraphicContext& graphics, TextureCache& cache, CommandBuffer&
 	inputs.camera        = camera;
 	inputs.guest_frame   = g_guest_frame;
 	inputs.valid         = true;
+}
+
+void NewGuestFrame() {
+	g_sources.valid = false;
+	g_camera.valid  = false;
+	++g_guest_frame;
 }
 
 void DestroyInputs(GraphicContext& graphics, FrameInputs& inputs) {

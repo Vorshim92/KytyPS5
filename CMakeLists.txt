@@ -394,6 +394,7 @@ list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/local/frame-gen-hudless.cpp"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-upscale.h"
 	"${KYTY_SOURCE_DIR}/local/frame-gen-upscale.cpp"
+	"${KYTY_SOURCE_DIR}/local/frame-gen-vk.h"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.h"
 	"${KYTY_SOURCE_DIR}/local/perf-overlay.cpp"
 	"${KYTY_SOURCE_DIR}/local/resource-plan-serial.h"

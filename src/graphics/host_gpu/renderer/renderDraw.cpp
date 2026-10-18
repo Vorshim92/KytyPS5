@@ -39,6 +39,7 @@
 #include "frame-capture.h"
 #include "frame-gen.h"
 #include "frame-gen-hudless.h"
+#include "frame-gen-upscale.h"
 #include "native-preparation-state.h"
 #include "slow-log.h"
 #include "xpr-capture.h"
@@ -1475,7 +1476,7 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (FrameCapture::Active()) {
 		CaptureFrameDraw(buffer, draw, state, bindings.vertex, bindings.pixel);
 	}
-	if (FrameGen::Enabled() && state.vs_input_info.stage.program != nullptr) {
+	if (FrameGen::Capturing() && state.vs_input_info.stage.program != nullptr) {
 		FrameGen::OnDraw(state.vs_input_info.stage.program->shader_hash,
 		                 state.vs_input_info.stage.resources.flattened_srt);
 	}
@@ -1567,9 +1568,9 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
-	// KYTY_FG_HUDLESS: a draw into the flip image (the game's final composite) is recorded directly, drawn once more
-	// without its HUD first (frame-gen-hudless.h).
-	const int flip_slot = FrameGen::HudlessCapturing() && !mesh_active && bindings.pixel.has_value()
+	// KYTY_FG_HUDLESS, KYTY_UPSCALE: a draw into the flip image (the game's final composite) is recorded directly,
+	// drawn once more without its HUD first (frame-gen-hudless.h), its 3D image upscaled (frame-gen-upscale.h).
+	const int flip_slot = FrameGen::CompositeCapturing() && !mesh_active && bindings.pixel.has_value()
 	                          ? FrameGen::FlipSlot(std::span {state.color_info, state.color_count})
 	                          : -1;
 	bool record_draw = false;
@@ -1586,6 +1587,10 @@ bool RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	     primitive == Prospero::PrimitiveType::kTriStrip ||
 	     primitive == Prospero::PrimitiveType::kRectList);
 #endif
+	// (Before its descriptors are written: the composite, and its HUD-less draw, sample the upscaled image.)
+	if (flip_slot >= 0) {
+		FrameGen::UpscaleComposite(buffer, rendering, bindings.pixel->images);
+	}
 	auto vk_buffer = buffer.Handle();
 	if (set_bind_debug) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x100u);

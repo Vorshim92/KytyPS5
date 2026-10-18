@@ -1,5 +1,7 @@
 #include "frame-gen-hudless.h"
 
+#include "frame-gen-vk.h"
+
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
@@ -35,8 +37,10 @@ namespace {
 // candidate. Written at the guest flip, read by any translating thread (IsFlipTarget).
 std::array<std::atomic<uint64_t>, 4> g_flips {};
 uint32_t                             g_flip_next = 0;
-// This frame's composite was drawn without its HUD: later draws into a flip image are the game's alone.
+// This frame's composite was drawn without its HUD (taken), was upscaled (NoteUpscaled): once each of the two that is
+// on is done, later draws into a flip image are the game's alone.
 std::atomic<bool> g_taken {false};
+std::atomic<bool> g_upscaled {false};
 
 // Kyty.Gpu.
 int                                    g_ui_override = -1;    // KYTY_FG_HUDLESS_UI
@@ -78,6 +82,13 @@ bool IsFlipAddress(uint64_t address) {
 	       });
 }
 
+// This frame's composite is still to come for the HUD-less image (until it is drawn without its HUD) or the upscaler
+// (until it took it).
+bool CompositeWanted() {
+	return (g_hudless && !g_taken.load(std::memory_order_relaxed)) ||
+	       (UpscaleOn() && !g_upscaled.load(std::memory_order_relaxed));
+}
+
 // The frame image's format (Presenter::PrepareFrame): the flip image's pixels, which a copy or a blit then keeps.
 vk::Format UnormOf(vk::Format format) {
 	switch (format) {
@@ -107,44 +118,6 @@ bool IsCopyable(const VulkanImage& image) {
 	return image.mip_levels == 1 && image.layers == 1 && image.samples == 1 && (image.usage & usage) == usage;
 }
 
-void Transition(vk::CommandBuffer command, VulkanImage& image, vk::ImageLayout layout, vk::AccessFlags2 access,
-                vk::PipelineStageFlags2 stage) {
-	vk::ImageMemoryBarrier2 barrier {};
-	barrier.srcStageMask        = image.state.pl_stage;
-	barrier.srcAccessMask       = image.state.access_mask;
-	barrier.dstStageMask        = stage;
-	barrier.dstAccessMask       = access;
-	barrier.oldLayout           = image.state.layout;
-	barrier.newLayout           = layout;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image               = image.image;
-	barrier.subresourceRange    = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-	vk::DependencyInfo dependency {};
-	dependency.imageMemoryBarrierCount = 1;
-	dependency.pImageMemoryBarriers    = &barrier;
-	command.pipelineBarrier2(dependency);
-	image.state = {stage, access, layout};
-}
-
-void Create(GraphicContext& graphics, VulkanImage& image, vk::Format format, vk::Extent3D extent,
-            vk::ImageUsageFlags usage) {
-	vk::ImageCreateInfo create {};
-	create.imageType     = vk::ImageType::e2D;
-	create.extent        = vk::Extent3D {extent.width, extent.height, 1};
-	create.mipLevels     = 1;
-	create.arrayLayers   = 1;
-	create.format        = format;
-	create.tiling        = vk::ImageTiling::eOptimal;
-	create.initialLayout = vk::ImageLayout::eUndefined;
-	create.usage         = usage;
-	create.sharingMode   = vk::SharingMode::eExclusive;
-	create.samples       = vk::SampleCountFlagBits::e1;
-	if (!graphics.CreateImage(create, image)) {
-		EXIT("HUD-less image: cannot allocate a %ux%u image\n", extent.width, extent.height);
-	}
-}
-
 // One of the capture's images, of that format and size: made anew when it is not one, the image it replaces deleted
 // once the GPU is past the commands recorded so far (the renderer thread's, which used it).
 VulkanImage& Reserve(CommandBuffer& command, std::unique_ptr<VulkanImage>& image, vk::Format format,
@@ -158,8 +131,8 @@ VulkanImage& Reserve(CommandBuffer& command, std::unique_ptr<VulkanImage>& image
 		    [&graphics, retired = std::move(image)]() mutable { graphics.DeleteImage(*retired); });
 	}
 	image = std::make_unique<VulkanImage>();
-	Create(graphics, *image, format, extent,
-	       vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst);
+	CreateImage(graphics, *image, format, extent,
+	            vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst, "HUD-less image");
 	return *image;
 }
 
@@ -180,15 +153,6 @@ void DestroyDisplay(GraphicContext& graphics, FrameInputs& inputs) {
 	}
 	inputs.has_hudless_display = false;
 }
-
-// A texture cache image's barrier state as it was, put back once its copies are done.
-struct SavedState {
-	explicit SavedState(const Image& image): whole(image.CurrentState()), parts(image.backing.subresource_states) {}
-	void Restore(Image& image, vk::CommandBuffer command) const { image.RestoreState(whole, parts, command); }
-
-	VulkanImageState              whole;
-	std::vector<VulkanImageState> parts;
-};
 
 // The image into `copy`, which is left a transfer source.
 void CopyOut(vk::CommandBuffer command, Image& image, VulkanImage& copy) {
@@ -294,8 +258,10 @@ int FlipSlot(std::span<const RenderColorInfo> targets) {
 	if (targets.empty()) {
 		return -1;
 	}
-	++g_draws[KeyOf(targets[0].image_id)];
-	if (g_taken.load(std::memory_order_relaxed)) {
+	if (g_hudless) {
+		++g_draws[KeyOf(targets[0].image_id)];
+	}
+	if (!CompositeWanted()) {
 		return -1;
 	}
 	for (size_t i = 0; i < targets.size(); ++i) {
@@ -307,11 +273,19 @@ int FlipSlot(std::span<const RenderColorInfo> targets) {
 }
 
 bool IsFlipTarget(uint64_t address) {
-	return !g_taken.load(std::memory_order_relaxed) && IsFlipAddress(address);
+	return CompositeWanted() && IsFlipAddress(address);
+}
+
+void NoteUpscaled() {
+	g_upscaled.store(true, std::memory_order_relaxed);
 }
 
 void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const DrawRenderState& state, uint32_t slot,
                     std::span<const TextureBinding> images, const std::function<void()>& redraw) {
+	// (FlipSlot also offers the composite for the upscaler alone: the HUD-less image off, or this frame's taken.)
+	if (!g_hudless || g_taken.load(std::memory_order_relaxed)) {
+		return;
+	}
 	auto& cache = command.GetContext().GetTextureCache();
 	auto* flip  = cache.TryGetImage(state.color_info[slot].image_id);
 	++g_stats.composites;
@@ -409,12 +383,16 @@ void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const 
 	g_stats.format     = ui.backing.format;
 }
 
-void PrepareHudless(FrameInputs& inputs, const Image& flip) {
+void PrepareComposite(FrameInputs& inputs, const Image& flip) {
 	// This flip image among the recent ones (a new one in the oldest's place).
 	const uint64_t address = flip.info.data.address;
 	if (!IsFlipAddress(address)) {
 		g_flips[g_flip_next].store(address, std::memory_order_relaxed);
 		g_flip_next = (g_flip_next + 1) % static_cast<uint32_t>(g_flips.size());
+	}
+	g_upscaled.store(false, std::memory_order_relaxed);
+	if (!g_hudless) {
+		return;
 	}
 	const bool taken = g_taken.exchange(false, std::memory_order_relaxed);
 	g_draws.clear();
@@ -448,8 +426,8 @@ void ScaleHudless(GraphicContext& graphics, vk::CommandBuffer command, FrameInpu
 	if (display.image == nullptr || display.format != format || display.extent.width != backbuffer.width ||
 	    display.extent.height != backbuffer.height) {
 		DestroyDisplay(graphics, inputs);
-		Create(graphics, display, format, vk::Extent3D {backbuffer.width, backbuffer.height, 1},
-		       vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled);
+		CreateImage(graphics, display, format, vk::Extent3D {backbuffer.width, backbuffer.height, 1},
+		            vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled, "HUD-less image");
 		vk::ImageViewCreateInfo view {};
 		view.image            = display.image;
 		view.viewType         = vk::ImageViewType::e2D;

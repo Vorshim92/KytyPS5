@@ -8,9 +8,13 @@
 // follows unchanged. The copy goes with the presented frame (FrameInputs::hudless); the present thread lays it out as
 // the backbuffer (ScaleHudless), which BeforePresent tags as kBufferTypeHUDLessColor.
 //
+// The composite is found here for the upscaler too (KYTY_UPSCALE, frame-gen-upscale.h), which upscales its 3D image
+// first: the HUD-less image then has the upscaled scene as well.
+//
 // KYTY_FG_HUDLESS_UI=n: the HUD texture is the composite's candidate n (the log lists them), not the guess.
 // KYTY_FG_HUDLESS_DEBUG=1: the HUD texture is left cleared, so the screen shows what DLSS-G gets (the HUD gone).
 #include "frame-gen.h"
+#include "frame-gen-upscale.h"
 
 #include <cstdint>
 #include <functional>
@@ -28,29 +32,37 @@ extern bool g_hudless;
 [[nodiscard]] inline bool HudlessOn() noexcept {
 	return g_hudless;
 }
-// ... and the current guest frame shows the game's 3D view (SceneNoted): its composite is drawn without the HUD.
-[[nodiscard]] inline bool HudlessCapturing() {
-	return g_hudless && SceneNoted();
+// The game's final composite is wanted: for the HUD-less image or for the upscaler.
+[[nodiscard]] inline bool CompositeOn() noexcept {
+	return g_hudless || UpscaleOn();
+}
+// ... and the current guest frame shows the game's 3D view (SceneNoted): its composite is looked for.
+[[nodiscard]] inline bool CompositeCapturing() {
+	return CompositeOn() && SceneNoted();
 }
 
 // OnDevice, once DLSS-G is ready: the switches, read once.
 void InitializeHudless();
 
-// Renderer thread (Kyty.Gpu), normal draw path, while HudlessCapturing(). FlipSlot: the draw counted for its first
+// Renderer thread (Kyty.Gpu), normal draw path, while CompositeCapturing(). FlipSlot: the draw counted for its first
 // target (the HUD texture guess), and the slot of `targets` that is a recent flip image while this frame's composite
-// is still to come (-1: none). Such a draw is recorded directly and stored for neither the table nor the native XPR
-// path. BeforeFlipDraw, with everything of the draw (`state`) bound and before its render pass begins: `redraw` (the
-// draw) once more without the HUD texture (one of `images`), its result kept, then the flip image and the HUD texture
-// as they were.
+// is still wanted (-1: none): by the HUD-less image until it is drawn without its HUD, by the upscaler until it took it
+// (NoteUpscaled). Such a draw is recorded directly and stored for neither the table nor the native XPR path.
+// BeforeFlipDraw, with everything of the draw (`state`) bound and before its render pass begins: `redraw` (the draw)
+// once more without the HUD texture (one of `images`), its result kept, then the flip image and the HUD texture as
+// they were (nothing when the HUD-less image is off or this frame's is taken).
 [[nodiscard]] int FlipSlot(std::span<const RenderColorInfo> targets);
 void BeforeFlipDraw(CommandBuffer& command, const RenderState& rendering, const DrawRenderState& state, uint32_t slot,
                     std::span<const TextureBinding> images, const std::function<void()>& redraw);
-// Any translating thread (the table and native XPR paths), while HudlessCapturing(): `address` is a recent flip
-// image's and this frame's composite is still to come (the draw is left to the normal path).
+// Renderer thread: the upscaler is done with this frame's composite (UpscaleComposite, upscaled or not).
+void NoteUpscaled();
+// Any translating thread (the table and native XPR paths), while CompositeCapturing(): `address` is a recent flip
+// image's and this frame's composite is still wanted (the draw is left to the normal path).
 [[nodiscard]] bool IsFlipTarget(uint64_t address);
 
-// At the guest flip of `flip`, after PrepareInputs: the composite's HUD-less image goes with `inputs`.
-void PrepareHudless(FrameInputs& inputs, const Image& flip);
+// At the guest flip of `flip` (after PrepareInputs with DLSS-G), while CompositeOn(): the flip image noted, the next
+// frame's composite wanted again; with the HUD-less image, this composite's goes with `inputs`.
+void PrepareComposite(FrameInputs& inputs, const Image& flip);
 // Present thread, in the present's command buffer after RecordPresentCommands: the frame's HUD-less image laid out as
 // the backbuffer (`region`: where the game image is, black around it), for BeforePresent's tag.
 void ScaleHudless(GraphicContext& graphics, vk::CommandBuffer command, FrameInputs& inputs, vk::Extent2D backbuffer,
