@@ -2513,8 +2513,8 @@ private:
 		auto               guest_end         = HOST_USER_MAX + 1u;
 		auto               next_addr         = HOST_SYSTEM_MANAGED_MIN;
 		// KYTY_RESERVE_CEILING=<hex>: stop below it, leaving the top of the 40-bit range to the
-		// driver. DLSS (frame generation or super resolution: NvidiaNgxWanted) needs it: NVIDIA's
-		// optical flow and NGX interop reserve about 44 GiB of host address space below 1 TiB when the device is
+		// driver. DLSS (NvidiaNgxWanted) needs it: NVIDIA's optical flow and NGX
+		// interop reserve about 44 GiB of host address space below 1 TiB when the device is
 		// created, and fail it (VK_ERROR_INITIALIZATION_FAILED) when the guest took all of it.
 		// With frame generation the guest stops at 512 GiB (its mappings take the lowest free
 		// addresses, tens of GiB above HOST_USER_MIN): a ceiling of 0xE0_0000_0000 left an RTX 5090

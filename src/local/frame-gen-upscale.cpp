@@ -114,6 +114,9 @@ Snapshot                  g_snapshot;
 std::unique_ptr<OwnImage> g_output;                      // DLSS's output, which the composite samples
 std::unique_ptr<OwnImage> g_dlaa;                        // DLAA's output in the TAA's place
 uint64_t                  g_composite_flip = UINT64_MAX; // the last frame whose composite was found
+// The last composite was not upscaled (or none was found): sin TAA waits for one that is, since its raw frame would be
+// shown unresolved.
+bool g_upscale_failing = false;
 
 // Why a frame was not upscaled (or its TAA kept), each logged once.
 enum class Refusal : uint32_t {
@@ -293,7 +296,9 @@ void LogComposite(CommandBuffer& command, std::span<const TextureBinding> images
 	Emit(text.c_str());
 }
 
-void MemoryBarrier(vk::CommandBuffer command, vk::PipelineStageFlags2 source_stage, vk::AccessFlags2 source_access,
+// A memory dependency of everything recorded so far at `source_stage` on what follows at `stage`. (Not MemoryBarrier:
+// a macro of <windows.h>.)
+void GlobalBarrier(vk::CommandBuffer command, vk::PipelineStageFlags2 source_stage, vk::AccessFlags2 source_access,
                    vk::PipelineStageFlags2 stage, vk::AccessFlags2 access) {
 	vk::MemoryBarrier2 barrier {};
 	barrier.srcStageMask  = source_stage;
@@ -455,7 +460,7 @@ bool ReplaceTaaColor(CommandBuffer& command, Image& output, vk::ImageView output
 	const auto vk_command = command.Handle();
 	if (!pass.cleared) {
 		vk_command.fillBuffer(pass.stats, 0, BypassStatsBytes, 0);
-		MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+		GlobalBarrier(vk_command,vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
 		              vk::PipelineStageFlagBits2::eComputeShader,
 		              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
 		pass.cleared = true;
@@ -490,7 +495,7 @@ bool ReplaceTaaColor(CommandBuffer& command, Image& output, vk::ImageView output
 			vk_command.dispatch(groups_x, groups_y, 1);
 		}
 		// (Each mode's writes, the sums, the gain and the output, before the next one reads them.)
-		MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+		GlobalBarrier(vk_command,vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
 		              vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
 		              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
 		                  vk::AccessFlagBits2::eTransferRead);
@@ -499,7 +504,7 @@ bool ReplaceTaaColor(CommandBuffer& command, Image& output, vk::ImageView output
 		const vk::BufferCopy copy {0, 0, sizeof(float) * 4};
 		vk_command.copyBuffer(pass.stats, pass.readback, 1, &copy);
 	}
-	MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
+	GlobalBarrier(vk_command,vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
 	              vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite,
 	              vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost,
 	              vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
@@ -554,10 +559,11 @@ bool FindTaaSlot(CommandBuffer& command, std::span<const TextureBinding> images,
 	return true;
 }
 
-// Sin TAA: the TAA dispatch's raw jittered color into its output.
+// Sin TAA: the TAA dispatch's raw jittered color into its output, while the upscaler upscales the composite (with this
+// frame's snapshot).
 void BypassTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
 	TaaSlot slot;
-	if (FindTaaSlot(command, images, slot) &&
+	if (!g_upscale_failing && g_snapshot.flip == GuestFlips() && FindTaaSlot(command, images, slot) &&
 	    ReplaceTaaColor(command, *slot.output, slot.out_b->image_view, slot.color_b->image_view, slot.color_b->layout,
 	                    slot.extent, "the raw frame for the upscaler")) {
 		g_bypassed_flip = GuestFlips();
@@ -875,7 +881,14 @@ bool Evaluate(Viewport& port, vk::CommandBuffer command, const Resource& color, 
 		return Failed(port, "slSetTagForFrame", result);
 	}
 	const sl::BaseStructure* inputs[] {&viewport};
-	if (const auto result = g_api.evaluate(sl::kFeatureDLSS, *token, inputs, 1, cmd); result != sl::Result::eOk) {
+	const auto               result = g_api.evaluate(sl::kFeatureDLSS, *token, inputs, 1, cmd);
+	// (Whatever stages and images DLSS used, before what follows: the transitions after it and the game's next work
+	// assume its accesses as compute shader ones.)
+	GlobalBarrier(command, vk::PipelineStageFlagBits2::eAllCommands,
+	              vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+	              vk::PipelineStageFlagBits2::eAllCommands,
+	              vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
+	if (result != sl::Result::eOk) {
 		return Failed(port, "DLSS evaluate", result);
 	}
 	port.failures = 0;
@@ -1062,9 +1075,12 @@ void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> im
 	const uint64_t flip = GuestFlips();
 	// The frame before ran the TAA pass, but none of its draws was found to be the composite.
 	if (g_upscale && g_snapshot.flip != UINT64_MAX && g_snapshot.flip + 1 == flip &&
-	    g_composite_flip != g_snapshot.flip && FirstRefusal(Refusal::NoComposite)) {
-		Report("Upscaling: a frame with the TAA pass had no composite (a normal-path draw into a flip image sampling "
-		       "its 3D image): not upscaled\n");
+	    g_composite_flip != g_snapshot.flip) {
+		g_upscale_failing = true;
+		if (FirstRefusal(Refusal::NoComposite)) {
+			Report("Upscaling: a frame with the TAA pass had no composite (a normal-path draw into a flip image "
+			       "sampling its 3D image): not upscaled\n");
+		}
 	}
 	if (g_upscale || g_taa_dlss) {
 		TakeSnapshot(command, images);
@@ -1124,9 +1140,10 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 		}
 		return;
 	}
-	// This frame's composite, upscaled or not.
+	// This frame's composite, upscaled or not (failing until it is).
 	NoteUpscaled();
-	g_composite_flip = flip;
+	g_composite_flip  = flip;
+	g_upscale_failing = true;
 	++g_composites;
 	// Its descriptor is written with the 3D image's layout (CommitBindings): shader read-only for a texture neither a
 	// target nor kept general. Only then may the upscaled image, in that layout, take its place (its view as the 3D
@@ -1192,6 +1209,7 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 	g_reset           = false;
 	g_jittered        = jittered;
 	g_upscaled_flip   = flip;
+	g_upscale_failing = false;
 	if (++g_upscaled == 1 || g_upscaled % 3600 == 0) {
 		Report("Upscaling: %ux%u -> %ux%u (%" PRIu64 " frames; %" PRIu64 " composites not upscaled)\n", render.width,
 		       render.height, output.width, output.height, g_upscaled, g_composites - g_upscaled);
