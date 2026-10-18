@@ -29,7 +29,8 @@ shared uint group_taa;
 shared uint group_raw;
 
 float Luma(vec3 c) {
-	return clamp(dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.0, 64.0);
+	float luma = dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+	return isnan(luma) || isinf(luma) ? 0.0 : clamp(luma, 0.0, 64.0); // (a NaN would make the sums undefined)
 }
 
 void main() {
@@ -69,5 +70,10 @@ void main() {
 	float gain = (stats.gain > 0.0 && stats.gain < 16.0 ? stats.gain : 1.0) * push.scale;
 	vec4  raw  = texelFetch(raw_color, pixel, 0);
 	vec4  taa  = imageLoad(taa_output, pixel);
-	imageStore(taa_output, pixel, vec4(raw.rgb * gain, taa.a));
+	// A raw pixel that is not a number or is infinite (a bright highlight's, which the TAA filters out) would make its
+	// whole block of DLSS's output black: the TAA's own color takes its place, and the rest stays within half precision.
+	// (The squares that flicker on lit candles' wax are the game's on this emulator, with DLSS off and on: not these.)
+	vec3 color = raw.rgb * gain;
+	if (any(isnan(color)) || any(isinf(color))) color = taa.rgb;
+	imageStore(taa_output, pixel, vec4(clamp(color, vec3(0.0), vec3(65504.0)), taa.a));
 }
