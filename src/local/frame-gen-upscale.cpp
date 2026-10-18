@@ -15,7 +15,9 @@
 #ifdef KYTY_LOCAL_VULKAN_RECORDING
 #include "vulkan-recording.h"
 #endif
+#include "gpu_tiler_shaders/taa_bypass_spv.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cinttypes>
@@ -73,6 +75,13 @@ char     g_preset        = '\0';  // KYTY_DLSS_PRESET: J, K, L or M; none: NVIDI
 bool     g_dlss_alpha    = false; // KYTY_DLSS_ALPHA=1
 float    g_mv_sign       = -1.0f; // KYTY_FRAMEGEN_MV_SIGN (as DLSS-G's)
 bool     g_mv_pixels     = false; // KYTY_FRAMEGEN_MV=px (as DLSS-G's)
+// Sin TAA (KYTY_TAA_REPLACE=upscaler, with the upscaler).
+bool  g_bypass_wanted    = false;
+float g_bypass_scale     = 1.0f;  // KYTY_TAA_BYPASS_GAIN: a fixed factor on top
+bool  g_bypass_match     = true;  // KYTY_TAA_MATCH=0: no brightness match
+float g_bypass_smoothing = 0.1f;  // KYTY_TAA_MATCH_SMOOTH: this frame's weight in the gain
+float g_jitter_sign      = 1.0f;  // KYTY_UPSCALE_JITTER_SIGN=-1: DLSS's jitter the other way round
+bool  g_bypass           = false; // ... on (the upscaler ready)
 
 // Streamline from two threads (above).
 bool                  g_streamline_shared = false; // DLSS super resolution on (set before the threads use Streamline)
@@ -96,8 +105,18 @@ Snapshot                  g_snapshot;
 std::unique_ptr<OwnImage> g_output;                      // DLSS's output, which the composite samples
 uint64_t                  g_composite_flip = UINT64_MAX; // the last frame whose composite was found
 
-// Why a frame was not upscaled, each logged once.
-enum class Refusal : uint32_t { Speculation, TaaImages, NoComposite, NoScene, SceneBinding, Smaller };
+// Why a frame was not upscaled (or its TAA kept), each logged once.
+enum class Refusal : uint32_t {
+	Speculation,
+	TaaImages,
+	NoComposite,
+	NoScene,
+	SceneBinding,
+	Smaller,
+	BypassImages,
+	BypassPipeline,
+	NoCamera
+};
 uint32_t g_refusals = 0;
 
 bool FirstRefusal(Refusal refusal) {
@@ -105,6 +124,12 @@ bool FirstRefusal(Refusal refusal) {
 	const bool     first = (g_refusals & bit) == 0;
 	g_refusals |= bit;
 	return first;
+}
+
+// A number switch; `fallback` when it is not set.
+float NumberSwitch(const char* name, float fallback) {
+	const char* value = std::getenv(name);
+	return value != nullptr && *value != '\0' ? static_cast<float>(std::atof(value)) : fallback;
 }
 
 // A line in the log and on stdout (the run log).
@@ -201,6 +226,257 @@ void TakeSnapshot(CommandBuffer& command, std::span<const TextureBinding> images
 	g_snapshot.flip   = GuestFlips();
 }
 
+void MemoryBarrier(vk::CommandBuffer command, vk::PipelineStageFlags2 source_stage, vk::AccessFlags2 source_access,
+                   vk::PipelineStageFlags2 stage, vk::AccessFlags2 access) {
+	vk::MemoryBarrier2 barrier {};
+	barrier.srcStageMask  = source_stage;
+	barrier.srcAccessMask = source_access;
+	barrier.dstStageMask  = stage;
+	barrier.dstAccessMask = access;
+	vk::DependencyInfo dependency {};
+	dependency.memoryBarrierCount = 1;
+	dependency.pMemoryBarriers    = &barrier;
+	command.pipelineBarrier2(dependency);
+}
+
+// taa-bypass.comp's pipeline, made at its first use, with its stats buffer (the luminance sums, and the gain it keeps
+// from frame to frame) and a host copy of the gain for the log.
+struct Bypass {
+	vk::DescriptorSetLayout set_layout      = nullptr;
+	vk::PipelineLayout      layout          = nullptr;
+	vk::Pipeline            pipeline        = nullptr;
+	vk::Sampler             sampler         = nullptr;
+	VkBuffer                stats           = VK_NULL_HANDLE;
+	VmaAllocation           stats_memory    = nullptr;
+	VkBuffer                readback        = VK_NULL_HANDLE;
+	VmaAllocation           readback_memory = nullptr;
+	const float*            readback_data   = nullptr;
+	bool                    cleared         = false; // the stats zeroed (the shader takes a gain out of range as 1)
+	bool                    failed          = false;
+	uint64_t                passes          = 0;
+};
+Bypass   g_bypass_pass;
+uint64_t g_bypassed_flip = UINT64_MAX; // the last frame whose TAA output got the raw frame
+
+// taa-bypass.comp's push constants and stats buffer (its Push and Stats).
+struct BypassPush {
+	float   scale;
+	int32_t mode; // 0: the two images' luminance sums, 1: the gain from them, 2: the output
+	float   smoothing;
+	int32_t match;
+};
+constexpr vk::DeviceSize BypassStatsBytes = 32;
+
+bool MakeBypass(GraphicContext& graphics) {
+	auto& pass = g_bypass_pass;
+	if (pass.pipeline != nullptr || pass.failed) {
+		return pass.pipeline != nullptr;
+	}
+	pass.failed = true; // (until it is made)
+	const auto                                    device = graphics.device;
+	std::array<vk::DescriptorSetLayoutBinding, 3> bindings {};
+	const std::array<vk::DescriptorType, 3> types {vk::DescriptorType::eCombinedImageSampler,
+	                                               vk::DescriptorType::eStorageImage,
+	                                               vk::DescriptorType::eStorageBuffer};
+	for (uint32_t i = 0; i < bindings.size(); ++i) {
+		bindings[i] = {i, types[i], 1, vk::ShaderStageFlagBits::eCompute, nullptr};
+	}
+	vk::DescriptorSetLayoutCreateInfo set_info {};
+	set_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+	set_info.bindingCount = static_cast<uint32_t>(bindings.size());
+	set_info.pBindings    = bindings.data();
+	if (device.createDescriptorSetLayout(&set_info, nullptr, &pass.set_layout) != vk::Result::eSuccess) {
+		return false;
+	}
+	const vk::PushConstantRange  push {vk::ShaderStageFlagBits::eCompute, 0, sizeof(BypassPush)};
+	vk::PipelineLayoutCreateInfo layout_info {};
+	layout_info.setLayoutCount         = 1;
+	layout_info.pSetLayouts            = &pass.set_layout;
+	layout_info.pushConstantRangeCount = 1;
+	layout_info.pPushConstantRanges    = &push;
+	if (device.createPipelineLayout(&layout_info, nullptr, &pass.layout) != vk::Result::eSuccess) {
+		return false;
+	}
+	vk::ShaderModuleCreateInfo module_info {};
+	module_info.codeSize    = sizeof(TAA_BYPASS_SPV);
+	module_info.pCode       = TAA_BYPASS_SPV;
+	vk::ShaderModule module = nullptr;
+	if (device.createShaderModule(&module_info, nullptr, &module) != vk::Result::eSuccess) {
+		return false;
+	}
+	vk::ComputePipelineCreateInfo pipeline_info {};
+	pipeline_info.stage.stage  = vk::ShaderStageFlagBits::eCompute;
+	pipeline_info.stage.module = module;
+	pipeline_info.stage.pName  = "main";
+	// (The subgroup size the game's compute pipelines require here: GraphicContext::InternalComputeSubgroupSize.)
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup {};
+	subgroup.requiredSubgroupSize = graphics.InternalComputeSubgroupSize();
+	if (subgroup.requiredSubgroupSize != 0) {
+		pipeline_info.stage.pNext = &subgroup;
+	}
+	pipeline_info.layout = pass.layout;
+	const auto created   = device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pass.pipeline);
+	device.destroyShaderModule(module, nullptr);
+	if (created != vk::Result::eSuccess) {
+		pass.pipeline = nullptr;
+		return false;
+	}
+	vk::SamplerCreateInfo sampler {};
+	sampler.magFilter    = vk::Filter::eNearest;
+	sampler.minFilter    = vk::Filter::eNearest;
+	sampler.mipmapMode   = vk::SamplerMipmapMode::eNearest;
+	sampler.addressModeU = vk::SamplerAddressMode::eClampToEdge;
+	sampler.addressModeV = vk::SamplerAddressMode::eClampToEdge;
+	sampler.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+	sampler.maxLod       = 0.0f;
+	if (device.createSampler(&sampler, nullptr, &pass.sampler) != vk::Result::eSuccess) {
+		return false;
+	}
+	VkBufferCreateInfo buffer {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	buffer.size  = BypassStatsBytes;
+	buffer.usage =
+	    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	VmaAllocationCreateInfo allocate {};
+	allocate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+	if (vmaCreateBuffer(graphics.allocator, &buffer, &allocate, &pass.stats, &pass.stats_memory, nullptr) !=
+	    VK_SUCCESS) {
+		pass.stats = VK_NULL_HANDLE;
+		return false;
+	}
+	// (Without the host copy the pass runs all the same: only the gain's log is missing.)
+	buffer.size  = sizeof(float) * 4;
+	buffer.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	allocate     = {};
+	allocate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+	allocate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	VmaAllocationInfo mapped {};
+	if (vmaCreateBuffer(graphics.allocator, &buffer, &allocate, &pass.readback, &pass.readback_memory, &mapped) ==
+	    VK_SUCCESS) {
+		pass.readback_data = static_cast<const float*>(mapped.pMappedData);
+	} else {
+		pass.readback = VK_NULL_HANDLE;
+	}
+	pass.failed = false;
+	return true;
+}
+
+void DestroyBypass(GraphicContext& graphics) {
+	auto&      pass   = g_bypass_pass;
+	const auto device = graphics.device;
+	if (pass.pipeline != nullptr) device.destroyPipeline(pass.pipeline, nullptr);
+	if (pass.layout != nullptr) device.destroyPipelineLayout(pass.layout, nullptr);
+	if (pass.set_layout != nullptr) device.destroyDescriptorSetLayout(pass.set_layout, nullptr);
+	if (pass.sampler != nullptr) device.destroySampler(pass.sampler, nullptr);
+	if (pass.stats != VK_NULL_HANDLE) vmaDestroyBuffer(graphics.allocator, pass.stats, pass.stats_memory);
+	if (pass.readback != VK_NULL_HANDLE) vmaDestroyBuffer(graphics.allocator, pass.readback, pass.readback_memory);
+	pass = {};
+}
+
+// The TAA's output (`output`, its storage view `output_view`) given `source`'s color (`source_view` sampled in
+// `source_layout`), scaled to the TAA output's mean luminance (taa-bypass.comp), its alpha kept. The TAA's dispatch
+// may be in a chain: the output's transition waits for its writes, and a barrier after the pass for the dispatches
+// after (the next one in the chain records none).
+bool ReplaceTaaColor(CommandBuffer& command, Image& output, vk::ImageView output_view, vk::ImageView source_view,
+                     vk::ImageLayout source_layout, vk::Extent2D extent, const char* source) {
+	auto& pass = g_bypass_pass;
+	if (!MakeBypass(command.GetGraphics())) {
+		if (FirstRefusal(Refusal::BypassPipeline)) {
+			Report("TAA: kept (taa-bypass.comp's pipeline could not be made)\n");
+		}
+		return false;
+	}
+	const auto vk_command = command.Handle();
+	if (!pass.cleared) {
+		vk_command.fillBuffer(pass.stats, 0, BypassStatsBytes, 0);
+		MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+		              vk::PipelineStageFlagBits2::eComputeShader,
+		              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+		pass.cleared = true;
+	}
+	const SavedState state(output);
+	output.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite, {},
+	               vk_command);
+	const vk::DescriptorImageInfo  source_info {pass.sampler, source_view, source_layout};
+	const vk::DescriptorImageInfo  output_info {nullptr, output_view, vk::ImageLayout::eGeneral};
+	const vk::DescriptorBufferInfo stats_info {pass.stats, 0, BypassStatsBytes};
+	std::array<vk::WriteDescriptorSet, 3> writes {};
+	for (uint32_t i = 0; i < writes.size(); ++i) {
+		writes[i].dstBinding      = i;
+		writes[i].descriptorCount = 1;
+	}
+	writes[0].descriptorType = vk::DescriptorType::eCombinedImageSampler;
+	writes[0].pImageInfo     = &source_info;
+	writes[1].descriptorType = vk::DescriptorType::eStorageImage;
+	writes[1].pImageInfo     = &output_info;
+	writes[2].descriptorType = vk::DescriptorType::eStorageBuffer;
+	writes[2].pBufferInfo    = &stats_info;
+	vk_command.bindPipeline(vk::PipelineBindPoint::eCompute, pass.pipeline);
+	vk_command.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, pass.layout, 0, writes);
+	BypassPush     push {g_bypass_scale, 0, g_bypass_smoothing, g_bypass_match ? 1 : 0};
+	const uint32_t groups_x = (extent.width + 7) / 8, groups_y = (extent.height + 7) / 8;
+	for (int32_t mode = 0; mode < 3; ++mode) {
+		push.mode = mode;
+		vk_command.pushConstants(pass.layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
+		if (mode == 1) {
+			vk_command.dispatch(1, 1, 1);
+		} else {
+			vk_command.dispatch(groups_x, groups_y, 1);
+		}
+		// (Each mode's writes, the sums, the gain and the output, before the next one reads them.)
+		MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+		              vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
+		              vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite |
+		                  vk::AccessFlagBits2::eTransferRead);
+	}
+	if (pass.readback != VK_NULL_HANDLE) {
+		const vk::BufferCopy copy {0, 0, sizeof(float) * 4};
+		vk_command.copyBuffer(pass.stats, pass.readback, 1, &copy);
+	}
+	MemoryBarrier(vk_command, vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer,
+	              vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite,
+	              vk::PipelineStageFlagBits2::eAllCommands | vk::PipelineStageFlagBits2::eHost,
+	              vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite |
+	                  vk::AccessFlagBits2::eHostRead);
+	state.Restore(output, vk_command);
+	// (The gain the log shows is a frame or two old: the host copy is read without waiting for the GPU.)
+	if (pass.passes++ == 0) {
+		Report("TAA: ran, then its color replaced by %s %ux%u (its alpha kept, brightness matched to the TAA's: %s)\n",
+		       source, extent.width, extent.height, g_bypass_match ? "on" : "off");
+	} else if (pass.passes % 600 == 0 && pass.readback_data != nullptr) {
+		(void)vmaInvalidateAllocation(command.GetGraphics().allocator, pass.readback_memory, 0, VK_WHOLE_SIZE);
+		Report("TAA: brightness gain %.3f (TAA/raw this frame %.3f, fixed factor %.3f)\n",
+		       static_cast<double>(pass.readback_data[2]), static_cast<double>(pass.readback_data[3]),
+		       static_cast<double>(g_bypass_scale));
+	}
+	return true;
+}
+
+// Sin TAA: the TAA dispatch's raw jittered color (binding 0, sampled) into its output (6, a storage image).
+void BypassTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
+	auto&       cache   = command.GetContext().GetTextureCache();
+	const auto* color_b = images.size() > 6 ? &images[0] : nullptr;
+	const auto* out_b   = images.size() > 6 ? &images[6] : nullptr;
+	auto*       color   = color_b != nullptr ? cache.TryGetImage(color_b->image_id) : nullptr;
+	auto*       output  = out_b != nullptr ? cache.TryGetImage(out_b->image_id) : nullptr;
+	if (color == nullptr || output == nullptr || color == output || color_b->image_view == nullptr ||
+	    !color_b->mip_views.empty() || color_b->desc.type != TextureCache::BindingType::Texture ||
+	    color_b->layout == vk::ImageLayout::eUndefined || out_b->image_view == nullptr || !out_b->mip_views.empty() ||
+	    out_b->desc.type != TextureCache::BindingType::Storage ||
+	    out_b->desc.view_info.format != vk::Format::eR16G16B16A16Sfloat ||
+	    color->backing.extent.width != output->backing.extent.width ||
+	    color->backing.extent.height != output->backing.extent.height) {
+		if (FirstRefusal(Refusal::BypassImages)) {
+			Report("TAA: kept (its color and output images are not the ones expected)\n");
+		}
+		return;
+	}
+	const vk::Extent2D extent {output->backing.extent.width, output->backing.extent.height};
+	if (ReplaceTaaColor(command, *output, out_b->image_view, color_b->image_view, color_b->layout, extent,
+	                    "the raw frame for the upscaler")) {
+		g_bypassed_flip = GuestFlips();
+	}
+}
+
 #ifdef KYTY_FRAMEGEN_STREAMLINE
 // Streamline's entry points, taken from the interposer FrameGen::Initialize loaded, and the DLSS plugin's functions.
 struct Api {
@@ -279,9 +555,24 @@ struct Viewport {
 };
 Viewport g_composite_port {1};
 bool     g_reset         = true;       // DLSS's history starts again
+bool     g_jittered      = false;      // ... and its input was the raw frame (sin TAA)
 uint64_t g_upscaled_flip = UINT64_MAX; // the last frame upscaled
 uint64_t g_composites    = 0;          // composites found with the TAA pass's images
 uint64_t g_upscaled      = 0;          // ... and upscaled
+
+// The current frame's camera jitter in pixels of `render` (KYTY_UPSCALE_JITTER_SIGN=-1: the other way round), y down:
+// the raw frame's, which DLSS then resolves; none without a camera this frame.
+sl::float2 CameraJitter(vk::Extent2D render) {
+	const auto& camera = CurrentCamera();
+	if (!camera.valid) {
+		if (FirstRefusal(Refusal::NoCamera)) {
+			Report("Upscaling: a frame without the camera (no G-buffer draw on the normal path): no jitter given\n");
+		}
+		return sl::float2(0.0f, 0.0f);
+	}
+	return sl::float2(g_jitter_sign * camera.jitter_ndc[0] * static_cast<float>(render.width) * 0.5f,
+	                  -g_jitter_sign * camera.jitter_ndc[1] * static_cast<float>(render.height) * 0.5f);
+}
 
 bool IsIdentity(const vk::ComponentMapping& mapping) {
 	const auto is = [](vk::ComponentSwizzle swizzle, vk::ComponentSwizzle own) {
@@ -520,6 +811,14 @@ void InitializeUpscale() {
 	if (upscale != nullptr && *upscale != '\0' && !g_dlss_wanted) {
 		Report("Upscaling: KYTY_UPSCALE=%s is not supported (only dlss): off\n", upscale);
 	}
+	const char*            taa     = std::getenv("KYTY_TAA_REPLACE");
+	const std::string_view replace = taa != nullptr ? taa : "";
+	g_bypass_wanted                = replace == "upscaler" && g_dlss_wanted;
+	if (!replace.empty() && replace != "upscaler") {
+		Report("Upscaling: KYTY_TAA_REPLACE=%s is not supported (upscaler): the TAA kept\n", taa);
+	} else if (replace == "upscaler" && !g_dlss_wanted) {
+		Report("Upscaling: KYTY_TAA_REPLACE=upscaler needs KYTY_UPSCALE=dlss: the TAA kept\n");
+	}
 	if (!g_dlss_wanted) {
 		return;
 	}
@@ -545,6 +844,19 @@ void InitializeUpscale() {
 	g_mv_sign         = sign != nullptr && std::atof(sign) > 0 ? 1.0f : -1.0f;
 	const char* mv    = std::getenv("KYTY_FRAMEGEN_MV");
 	g_mv_pixels       = mv != nullptr && std::string_view(mv) == "px";
+	if (g_bypass_wanted) {
+		// (The fork's other ways, KYTY_TAA_BYPASS_MODE=copy or raw, darkened the picture: not ported.)
+		if (const char* mode = std::getenv("KYTY_TAA_BYPASS_MODE");
+		    mode != nullptr && *mode != '\0' && std::string_view(mode) != "match") {
+			Report("Upscaling: KYTY_TAA_BYPASS_MODE=%s is not ported (it darkened the picture): the brightness match\n",
+			       mode);
+		}
+		g_bypass_scale     = std::max(NumberSwitch("KYTY_TAA_BYPASS_GAIN", 1.0f), 0.01f);
+		g_bypass_match     = NumberSwitch("KYTY_TAA_MATCH", 1.0f) != 0.0f;
+		g_bypass_smoothing = std::clamp(NumberSwitch("KYTY_TAA_MATCH_SMOOTH", 0.1f), 0.001f, 1.0f);
+	}
+	const char* jitter = std::getenv("KYTY_UPSCALE_JITTER_SIGN");
+	g_jitter_sign      = jitter != nullptr && std::atof(jitter) < 0 ? -1.0f : 1.0f;
 }
 
 bool UpscaleWantsStreamline() {
@@ -582,6 +894,13 @@ void UpscaleOnDevice(vk::PhysicalDevice physical_device) {
 	}
 	Report("Upscaling: DLSS super resolution ready (NGX DLSS %s), output height %s\n",
 	       known ? version.versionNGX.toStr().c_str() : "of unknown version", height);
+	if (g_bypass_wanted) {
+		g_bypass = true;
+		Report("Upscaling: sin TAA (KYTY_TAA_REPLACE=upscaler): DLSS gets the raw jittered frame, its brightness "
+		       "matched to the TAA's (match %s, this frame's weight %.3f, fixed factor %.3f, jitter sign %+.0f)\n",
+		       g_bypass_match ? "on" : "off", static_cast<double>(g_bypass_smoothing),
+		       static_cast<double>(g_bypass_scale), static_cast<double>(g_jitter_sign));
+	}
 #else
 	(void)physical_device;
 	Report("Upscaling: this build has no Streamline support: DLSS super resolution off\n");
@@ -605,6 +924,9 @@ void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> im
 	}
 	if (g_upscale) {
 		TakeSnapshot(command, images);
+	}
+	if (g_bypass) {
+		BypassTaa(command, images);
 	}
 }
 
@@ -692,11 +1014,14 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 	Transition(vk_command, target.image, vk::ImageLayout::eGeneral,
 	           vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
 	           vk::PipelineStageFlagBits2::eComputeShader);
-	// (After the game's TAA the 3D image is resolved: no jitter left in it.)
+	// After the game's TAA the 3D image is resolved, no jitter left in it; with sin TAA it is the raw frame's, made
+	// with the camera's jitter (a new history when that changes).
+	const bool     jittered = g_bypass && g_bypassed_flip == flip;
+	const auto     jitter   = jittered ? CameraJitter(render) : sl::float2(0.0f, 0.0f);
 	const Resource in {&color->backing, scene->image_view, vk::ImageLayout::eShaderReadOnlyOptimal};
 	const Resource out {&target.image, target.view, vk::ImageLayout::eGeneral};
-	const bool     done = Evaluate(g_composite_port, vk_command, in, out, sl::float2(0.0f, 0.0f),
-	                               g_reset || g_upscaled_flip + 1 != flip);
+	const bool     done = Evaluate(g_composite_port, vk_command, in, out, jitter,
+	                               g_reset || g_upscaled_flip + 1 != flip || jittered != g_jittered);
 	// (DLSS bound pipelines and descriptors of its own: the draw binds its state again.)
 	command.InvalidateGraphicsState();
 	Transition(vk_command, target.image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
@@ -711,6 +1036,7 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 	scene->image_view = target.view;
 	scene->layout     = vk::ImageLayout::eShaderReadOnlyOptimal;
 	g_reset           = false;
+	g_jittered        = jittered;
 	g_upscaled_flip   = flip;
 	if (++g_upscaled == 1 || g_upscaled % 3600 == 0) {
 		Report("Upscaling: %ux%u -> %ux%u (%" PRIu64 " frames; %" PRIu64 " composites not upscaled)\n", render.width,
@@ -731,6 +1057,7 @@ void DestroyUpscale(GraphicContext& graphics) {
 			image->reset();
 		}
 	}
+	DestroyBypass(graphics);
 }
 
 StreamlineGuard::StreamlineGuard() {

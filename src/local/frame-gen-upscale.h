@@ -12,6 +12,12 @@
 //   KYTY_DLSS_ALPHA=1: the alpha upscaled too (a check: by default only the color is).
 // With the game's TAA kept, DLSS gets its resolved image, so without jitter. Frames without the TAA pass (menus,
 // movies, loading) are composited as they are, and DLSS's history starts again after them.
+//   KYTY_TAA_REPLACE=upscaler ("sin TAA"): the TAA runs, then its output's color is replaced by the raw jittered
+//     frame's (taa-bypass.comp; its alpha, a counter and flags later passes read, kept), and the post-processing that
+//     follows and DLSS work on that, DLSS with the camera's jitter (KYTY_UPSCALE_JITTER_SIGN=-1 the other way round).
+//     The TAA scales its history by a game constant, so the raw frame is scaled to the TAA output's mean luminance:
+//     KYTY_TAA_MATCH=0 not, KYTY_TAA_MATCH_SMOOTH=<w> this frame's weight in the gain (default 0.1),
+//     KYTY_TAA_BYPASS_GAIN=<f> a fixed factor on top. (The brightness still differs from the TAA's in places.)
 //
 // Streamline is loaded as for DLSS-G (frame-gen.h, FrameGen::Initialize), with its DLSS plugin too, and also without
 // frame generation: it is then the process' Vulkan loader, DLSS-G off. DLSS evaluates in the game's command buffer on
@@ -48,7 +54,7 @@ void InitializeUpscale();
 void UpscaleOnDevice(vk::PhysicalDevice physical_device);
 
 // Renderer thread (Kyty.Gpu), normal path, while UpscaleCapturing(): right after the TAA pass's dispatch is recorded,
-// chained or not (`images`: its bindings, as its descriptors have them).
+// chained or not (`images`: its bindings, as its descriptors have them), its images copied, its output replaced.
 void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> images);
 // Renderer thread, a draw FlipSlot found (frame-gen-hudless.h), with everything bound but its descriptors, which are
 // written next (`rendering`: its pass, `images`: its pixel shader's): the first such draw of the frame that samples

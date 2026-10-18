@@ -358,6 +358,23 @@ add_custom_command(
 )
 list(APPEND kyty_emulator_src "${lod_stats_pack_header}")
 
+# Sin TAA's pass (KYTY_TAA_REPLACE, src/local/frame-gen-upscale.cpp): another image's color into the TAA's output,
+# its alpha kept, its brightness matched.
+set(taa_bypass_source "${KYTY_SOURCE_DIR}/local/taa-bypass.comp")
+set(taa_bypass_spv "${gpu_tiler_generated_dir}/taa_bypass.spv")
+set(taa_bypass_header "${gpu_tiler_generated_dir}/taa_bypass_spv.h")
+add_custom_command(
+	OUTPUT "${taa_bypass_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3 -Os
+	        -o "${taa_bypass_spv}" "${taa_bypass_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${taa_bypass_spv} -DOUTPUT=${taa_bypass_header}
+	        -DSYMBOL=TAA_BYPASS_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${taa_bypass_source}" "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${taa_bypass_header}")
+
 set(gpu_blit_generated_dir "${PROJECT_BINARY_DIR}/gpu_blit_shaders")
 set(gpu_blit_shader_sources
 	"${gpu_tiler_shader_dir}/gpu_blit_fs_triangle.vert"
