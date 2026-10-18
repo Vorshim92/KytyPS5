@@ -1170,7 +1170,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		DeviceFault::NoteDispatch(m_context.GetCommandScheduler().CurrentTick(), program.shader_hash, thread_group_x,
 		                          thread_group_y, thread_group_z, 0);
 	}
-	// KYTY_UPSCALE: the TAA pass's images right after it (frame-gen-upscale.h).
+	// KYTY_UPSCALE, KYTY_TAA_REPLACE, KYTY_TAA_DIAG: the TAA pass's images right after it (frame-gen-upscale.h).
 	if (FrameGen::UpscaleCapturing() && FrameGen::IsTaaShader(program.shader_hash)) {
 		FrameGen::AfterTaaDispatch(buffer, bindings.images);
 	}

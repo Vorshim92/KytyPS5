@@ -67,6 +67,7 @@ bool g_taa_hooked = false;
 namespace {
 
 void Report(const char* format, ...) KYTY_FORMAT_PRINTF(1, 2);
+void Append(std::string& text, const char* format, ...) KYTY_FORMAT_PRINTF(2, 3);
 
 // The switches (InitializeUpscale).
 bool     g_dlss_wanted   = false; // KYTY_UPSCALE=dlss
@@ -86,6 +87,10 @@ bool  g_bypass           = false; // ... on (the upscaler ready)
 bool  g_taa_dlss_wanted  = false;
 float g_taa_jitter_sign  = 1.0f;  // KYTY_TAA_JITTER_SIGN=-1 (else KYTY_UPSCALE_JITTER_SIGN's)
 bool  g_taa_dlss         = false; // ... on (DLSS ready)
+// KYTY_TAA_DIAG=1: [taa] lines (LogTaaDispatch).
+bool     g_taa_diag   = false;
+uint64_t g_diag_count = 0;          // TAA dispatches seen
+uint64_t g_diag_flip  = UINT64_MAX; // the frame logged, whose composite is logged too
 
 // Streamline from two threads (above).
 bool                  g_streamline_shared = false; // DLSS super resolution on (set before the threads use Streamline)
@@ -137,7 +142,13 @@ float NumberSwitch(const char* name, float fallback) {
 	return value != nullptr && *value != '\0' ? static_cast<float>(std::atof(value)) : fallback;
 }
 
-// A line in the log and on stdout (the run log).
+// Lines in the log and on stdout (the run log).
+void Emit(const char* text) {
+	LOGF("%s", text);
+	std::printf("%s", text);
+	std::fflush(stdout);
+}
+
 // NOLINTNEXTLINE(cert-dcl50-cpp)
 void Report(const char* format, ...) {
 	char    line[512];
@@ -145,9 +156,19 @@ void Report(const char* format, ...) {
 	va_start(args, format);
 	std::vsnprintf(line, sizeof(line), format, args);
 	va_end(args);
-	LOGF("%s", line);
-	std::printf("%s", line);
-	std::fflush(stdout);
+	Emit(line);
+}
+
+// NOLINTNEXTLINE(cert-dcl50-cpp)
+void Append(std::string& text, const char* format, ...) {
+	char    piece[256];
+	va_list args;
+	va_start(args, format);
+	const int length = std::vsnprintf(piece, sizeof(piece), format, args);
+	va_end(args);
+	if (length > 0) {
+		text.append(piece, std::min(static_cast<size_t>(length), sizeof(piece) - 1));
+	}
 }
 
 void Destroy(GraphicContext& graphics, OwnImage& image) {
@@ -229,6 +250,47 @@ void TakeSnapshot(CommandBuffer& command, std::span<const TextureBinding> images
 	CopyInto(vk_command, *motion, motion_copy, vk::ImageAspectFlagBits::eColor);
 	g_snapshot.extent = extent;
 	g_snapshot.flip   = GuestFlips();
+}
+
+// KYTY_TAA_DIAG: of `images`, each binding's guest address, format, size and use.
+void AppendImages(std::string& text, TextureCache& cache, std::span<const TextureBinding> images) {
+	for (size_t i = 0; i < images.size(); ++i) {
+		const auto* image = images[i].image_id ? cache.TryGetImage(images[i].image_id) : nullptr;
+		if (image == nullptr) {
+			Append(text, " [%zu] none", i);
+			continue;
+		}
+		Append(text, " [%zu] 0x%" PRIx64 " %s %ux%u%s", i, images[i].desc.info.data.address,
+		       vk::to_string(image->backing.format).c_str(), image->backing.extent.width,
+		       image->backing.extent.height,
+		       images[i].desc.type == TextureCache::BindingType::Storage ? " storage" : "");
+	}
+}
+
+// KYTY_TAA_DIAG: the camera and the TAA dispatch's images, for its first 6 frames and then every 600th (whose composite
+// is logged too: LogComposite).
+void LogTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> images) {
+	const uint64_t dispatch = g_diag_count++;
+	if (dispatch >= 6 && dispatch % 600 != 0) {
+		return;
+	}
+	g_diag_flip        = GuestFlips();
+	const auto& camera = CurrentCamera();
+	std::string text;
+	Append(text, "[taa] frame %" PRIu64 " (TAA dispatch %" PRIu64 "): camera %s, jitter ndc %.6f %.6f; %zu images:",
+	       g_diag_flip, dispatch, camera.valid ? "valid" : "none", static_cast<double>(camera.jitter_ndc[0]),
+	       static_cast<double>(camera.jitter_ndc[1]), images.size());
+	AppendImages(text, command.GetContext().GetTextureCache(), images);
+	text += '\n';
+	Emit(text.c_str());
+}
+
+void LogComposite(CommandBuffer& command, std::span<const TextureBinding> images) {
+	std::string text;
+	Append(text, "[taa] composite of frame %" PRIu64 " samples %zu images:", g_diag_flip, images.size());
+	AppendImages(text, command.GetContext().GetTextureCache(), images);
+	text += '\n';
+	Emit(text.c_str());
 }
 
 void MemoryBarrier(vk::CommandBuffer command, vk::PipelineStageFlags2 source_stage, vk::AccessFlags2 source_access,
@@ -868,6 +930,10 @@ void DlaaTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
 } // namespace
 
 void InitializeUpscale() {
+	// (The diagnostic needs no DLSS: it takes the TAA dispatch the normal way, as the upscaler does.)
+	const char* diag = std::getenv("KYTY_TAA_DIAG");
+	g_taa_diag       = diag != nullptr && std::string_view(diag) == "1";
+	g_taa_hooked     = g_taa_diag;
 	const char* upscale = std::getenv("KYTY_UPSCALE");
 	g_dlss_wanted       = upscale != nullptr && std::string_view(upscale) == "dlss";
 	if (upscale != nullptr && *upscale != '\0' && !g_dlss_wanted) {
@@ -990,6 +1056,9 @@ void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> im
 		}
 		return;
 	}
+	if (g_taa_diag) {
+		LogTaaDispatch(command, images);
+	}
 	const uint64_t flip = GuestFlips();
 	// The frame before ran the TAA pass, but none of its draws was found to be the composite.
 	if (g_upscale && g_snapshot.flip != UINT64_MAX && g_snapshot.flip + 1 == flip &&
@@ -1011,6 +1080,11 @@ void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> im
 }
 
 void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std::span<TextureBinding> images) {
+	// (As the game binds them: before the upscaled image takes the 3D image's place.)
+	if (g_taa_diag && g_diag_flip == GuestFlips()) {
+		LogComposite(command, images);
+		g_diag_flip = UINT64_MAX;
+	}
 	if (!g_upscale) {
 		return;
 	}

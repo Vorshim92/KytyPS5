@@ -22,6 +22,9 @@
 //     TAA dispatch's raw jittered color with the camera's jitter (KYTY_TAA_JITTER_SIGN=-1 the other way round), its
 //     result written over the TAA output's color as sin TAA's raw frame is. No upscaling: the composite then scales
 //     the 3D image itself, or the upscaler does.
+//   KYTY_TAA_DIAG=1 (a diagnostic, with or without the rest): [taa] lines for the first 6 frames with the TAA pass,
+//     then every 600th: the camera and the TAA dispatch's images (binding, guest address, format, size, storage), and
+//     those the composite samples, while it is looked for (KYTY_UPSCALE, KYTY_FG_HUDLESS).
 //
 // Streamline is loaded as for DLSS-G (frame-gen.h, FrameGen::Initialize), with its DLSS plugin too, and also without
 // frame generation: it is then the process' Vulkan loader, DLSS-G off. DLSS evaluates in the game's command buffer on
@@ -41,7 +44,7 @@ namespace FrameGen {
 
 // KYTY_UPSCALE=dlss with DLSS available on the device (UpscaleOnDevice).
 extern bool g_upscale;
-// The TAA pass's images are wanted right after its dispatch (AfterTaaDispatch): the upscaler's, DLAA's.
+// The TAA pass's images are wanted right after its dispatch (AfterTaaDispatch): by the upscaler, DLAA, the [taa] log.
 extern bool g_taa_hooked;
 [[nodiscard]] inline bool UpscaleOn() noexcept {
 	return g_upscale;
@@ -62,7 +65,8 @@ void UpscaleOnDevice(vk::PhysicalDevice physical_device);
 void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> images);
 // Renderer thread, a draw FlipSlot found (frame-gen-hudless.h), with everything bound but its descriptors, which are
 // written next (`rendering`: its pass, `images`: its pixel shader's): the first such draw of the frame that samples
-// the 3D image has it upscaled and its binding's view pointed at the result. Nothing without the upscaler.
+// the 3D image has it upscaled and its binding's view pointed at the result. Nothing without the upscaler (but the
+// [taa] log's line).
 void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std::span<TextureBinding> images);
 // At shutdown, the GPU idle: the upscaler's images.
 void DestroyUpscale(GraphicContext& graphics);
