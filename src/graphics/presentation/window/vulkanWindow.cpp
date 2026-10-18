@@ -1528,7 +1528,8 @@ void WindowContext::CreateVulkan() {
 		}
 		if (FrameGen::StreamlineLoaded()) {
 			EXIT("Could not create the Vulkan device with DLSS super resolution (NVIDIA Streamline): start without it "
-			     "(KYTY_UPSCALE unset). KYTY_FRAMEGEN_VERBOSE=1 logs why the driver refused it.%s\n",
+			     "(KYTY_UPSCALE and KYTY_TAA_REPLACE=dlss unset). KYTY_FRAMEGEN_VERBOSE=1 logs why the driver refused "
+			     "it.%s\n",
 			     FrameGen::RefusedDeviceAdvice().c_str());
 		}
 		EXIT("Could not create device");

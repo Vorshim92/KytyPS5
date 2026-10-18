@@ -82,6 +82,10 @@ bool  g_bypass_match     = true;  // KYTY_TAA_MATCH=0: no brightness match
 float g_bypass_smoothing = 0.1f;  // KYTY_TAA_MATCH_SMOOTH: this frame's weight in the gain
 float g_jitter_sign      = 1.0f;  // KYTY_UPSCALE_JITTER_SIGN=-1: DLSS's jitter the other way round
 bool  g_bypass           = false; // ... on (the upscaler ready)
+// DLSS (DLAA) in the TAA's place (KYTY_TAA_REPLACE=dlss).
+bool  g_taa_dlss_wanted  = false;
+float g_taa_jitter_sign  = 1.0f;  // KYTY_TAA_JITTER_SIGN=-1 (else KYTY_UPSCALE_JITTER_SIGN's)
+bool  g_taa_dlss         = false; // ... on (DLSS ready)
 
 // Streamline from two threads (above).
 bool                  g_streamline_shared = false; // DLSS super resolution on (set before the threads use Streamline)
@@ -103,6 +107,7 @@ struct Snapshot {
 };
 Snapshot                  g_snapshot;
 std::unique_ptr<OwnImage> g_output;                      // DLSS's output, which the composite samples
+std::unique_ptr<OwnImage> g_dlaa;                        // DLAA's output in the TAA's place
 uint64_t                  g_composite_flip = UINT64_MAX; // the last frame whose composite was found
 
 // Why a frame was not upscaled (or its TAA kept), each logged once.
@@ -113,7 +118,7 @@ enum class Refusal : uint32_t {
 	NoScene,
 	SceneBinding,
 	Smaller,
-	BypassImages,
+	TaaOutput,
 	BypassPipeline,
 	NoCamera
 };
@@ -451,28 +456,48 @@ bool ReplaceTaaColor(CommandBuffer& command, Image& output, vk::ImageView output
 	return true;
 }
 
-// Sin TAA: the TAA dispatch's raw jittered color (binding 0, sampled) into its output (6, a storage image).
-void BypassTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
-	auto&       cache   = command.GetContext().GetTextureCache();
-	const auto* color_b = images.size() > 6 ? &images[0] : nullptr;
-	const auto* out_b   = images.size() > 6 ? &images[6] : nullptr;
-	auto*       color   = color_b != nullptr ? cache.TryGetImage(color_b->image_id) : nullptr;
-	auto*       output  = out_b != nullptr ? cache.TryGetImage(out_b->image_id) : nullptr;
-	if (color == nullptr || output == nullptr || color == output || color_b->image_view == nullptr ||
-	    !color_b->mip_views.empty() || color_b->desc.type != TextureCache::BindingType::Texture ||
+// The TAA dispatch's raw jittered color (binding 0, sampled) and its output (6, an RGBA16F storage image) of that size.
+struct TaaSlot {
+	const TextureBinding* color_b = nullptr;
+	const TextureBinding* out_b   = nullptr;
+	Image*                color   = nullptr;
+	Image*                output  = nullptr;
+	vk::Extent2D          extent {};
+};
+
+bool FindTaaSlot(CommandBuffer& command, std::span<const TextureBinding> images, TaaSlot& slot) {
+	auto& cache = command.GetContext().GetTextureCache();
+	if (images.size() > 6) {
+		slot.color_b = &images[0];
+		slot.out_b   = &images[6];
+		slot.color   = cache.TryGetImage(slot.color_b->image_id);
+		slot.output  = cache.TryGetImage(slot.out_b->image_id);
+	}
+	const auto* color_b = slot.color_b;
+	const auto* out_b   = slot.out_b;
+	if (slot.color == nullptr || slot.output == nullptr || slot.color == slot.output ||
+	    color_b->image_view == nullptr || !color_b->mip_views.empty() ||
+	    color_b->desc.type != TextureCache::BindingType::Texture ||
 	    color_b->layout == vk::ImageLayout::eUndefined || out_b->image_view == nullptr || !out_b->mip_views.empty() ||
 	    out_b->desc.type != TextureCache::BindingType::Storage ||
 	    out_b->desc.view_info.format != vk::Format::eR16G16B16A16Sfloat ||
-	    color->backing.extent.width != output->backing.extent.width ||
-	    color->backing.extent.height != output->backing.extent.height) {
-		if (FirstRefusal(Refusal::BypassImages)) {
+	    slot.color->backing.extent.width != slot.output->backing.extent.width ||
+	    slot.color->backing.extent.height != slot.output->backing.extent.height) {
+		if (FirstRefusal(Refusal::TaaOutput)) {
 			Report("TAA: kept (its color and output images are not the ones expected)\n");
 		}
-		return;
+		return false;
 	}
-	const vk::Extent2D extent {output->backing.extent.width, output->backing.extent.height};
-	if (ReplaceTaaColor(command, *output, out_b->image_view, color_b->image_view, color_b->layout, extent,
-	                    "the raw frame for the upscaler")) {
+	slot.extent = {slot.output->backing.extent.width, slot.output->backing.extent.height};
+	return true;
+}
+
+// Sin TAA: the TAA dispatch's raw jittered color into its output.
+void BypassTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
+	TaaSlot slot;
+	if (FindTaaSlot(command, images, slot) &&
+	    ReplaceTaaColor(command, *slot.output, slot.out_b->image_view, slot.color_b->image_view, slot.color_b->layout,
+	                    slot.extent, "the raw frame for the upscaler")) {
 		g_bypassed_flip = GuestFlips();
 	}
 }
@@ -559,10 +584,12 @@ bool     g_jittered      = false;      // ... and its input was the raw frame (s
 uint64_t g_upscaled_flip = UINT64_MAX; // the last frame upscaled
 uint64_t g_composites    = 0;          // composites found with the TAA pass's images
 uint64_t g_upscaled      = 0;          // ... and upscaled
+Viewport g_taa_port {2};               // DLAA in the TAA's place
+uint64_t g_dlaa_flip     = UINT64_MAX; // the last frame it resolved
 
-// The current frame's camera jitter in pixels of `render` (KYTY_UPSCALE_JITTER_SIGN=-1: the other way round), y down:
-// the raw frame's, which DLSS then resolves; none without a camera this frame.
-sl::float2 CameraJitter(vk::Extent2D render) {
+// The current frame's camera jitter in pixels of `render` (`sign` -1: the other way round), y down: the raw frame's,
+// which DLSS then resolves; none without a camera this frame.
+sl::float2 CameraJitter(vk::Extent2D render, float sign) {
 	const auto& camera = CurrentCamera();
 	if (!camera.valid) {
 		if (FirstRefusal(Refusal::NoCamera)) {
@@ -570,8 +597,8 @@ sl::float2 CameraJitter(vk::Extent2D render) {
 		}
 		return sl::float2(0.0f, 0.0f);
 	}
-	return sl::float2(g_jitter_sign * camera.jitter_ndc[0] * static_cast<float>(render.width) * 0.5f,
-	                  -g_jitter_sign * camera.jitter_ndc[1] * static_cast<float>(render.height) * 0.5f);
+	return sl::float2(sign * camera.jitter_ndc[0] * static_cast<float>(render.width) * 0.5f,
+	                  -sign * camera.jitter_ndc[1] * static_cast<float>(render.height) * 0.5f);
 }
 
 bool IsIdentity(const vk::ComponentMapping& mapping) {
@@ -801,6 +828,41 @@ void LogVideoMemory(const Viewport& port) {
 		Report("Upscaling: DLSS uses about %" PRIu64 " MiB of video memory\n", state.estimatedVRAMUsageInBytes >> 20u);
 	}
 }
+
+// DLSS (DLAA) in the TAA's place: the TAA dispatch's raw jittered color resolved at the render size on viewport 2,
+// with the snapshot's depth and motion vectors and the camera's jitter, into an image of ours, which then takes the
+// TAA output's color as sin TAA's raw frame does (its alpha kept, its brightness matched). A frame gap starts a new
+// history; when DLSS fails the TAA's own output stays.
+void DlaaTaa(CommandBuffer& command, std::span<const TextureBinding> images) {
+	const uint64_t flip = GuestFlips();
+	TaaSlot        slot;
+	if (g_snapshot.flip != flip || !FindTaaSlot(command, images, slot) || slot.extent != g_snapshot.extent ||
+	    !SetOptions(g_taa_port, slot.extent, slot.extent)) {
+		return;
+	}
+	auto&      dlaa       = Reserve(command, g_dlaa, vk::Format::eR16G16B16A16Sfloat, slot.extent,
+	                                vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+	                                vk::ImageAspectFlagBits::eColor);
+	const auto vk_command = command.Handle();
+	Transition(vk_command, dlaa.image, vk::ImageLayout::eGeneral,
+	           vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+	           vk::PipelineStageFlagBits2::eComputeShader);
+	// (The raw color in the layout the TAA's dispatch read it in.)
+	const Resource in {&slot.color->backing, slot.color_b->image_view, slot.color_b->layout};
+	const Resource out {&dlaa.image, dlaa.view, vk::ImageLayout::eGeneral};
+	const bool     done = Evaluate(g_taa_port, vk_command, in, out, CameraJitter(slot.extent, g_taa_jitter_sign),
+	                               g_dlaa_flip + 1 != flip);
+	// (DLSS bound pipelines and descriptors of its own.)
+	command.InvalidateGraphicsState();
+	Transition(vk_command, dlaa.image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+	           vk::PipelineStageFlagBits2::eComputeShader);
+	if (!done) {
+		return;
+	}
+	g_dlaa_flip = flip;
+	(void)ReplaceTaaColor(command, *slot.output, slot.out_b->image_view, dlaa.view,
+	                      vk::ImageLayout::eShaderReadOnlyOptimal, slot.extent, "DLAA's output");
+}
 #endif
 
 } // namespace
@@ -814,12 +876,13 @@ void InitializeUpscale() {
 	const char*            taa     = std::getenv("KYTY_TAA_REPLACE");
 	const std::string_view replace = taa != nullptr ? taa : "";
 	g_bypass_wanted                = replace == "upscaler" && g_dlss_wanted;
-	if (!replace.empty() && replace != "upscaler") {
-		Report("Upscaling: KYTY_TAA_REPLACE=%s is not supported (upscaler): the TAA kept\n", taa);
+	g_taa_dlss_wanted              = replace == "dlss";
+	if (!replace.empty() && replace != "upscaler" && replace != "dlss") {
+		Report("Upscaling: KYTY_TAA_REPLACE=%s is not supported (upscaler, dlss): the TAA kept\n", taa);
 	} else if (replace == "upscaler" && !g_dlss_wanted) {
 		Report("Upscaling: KYTY_TAA_REPLACE=upscaler needs KYTY_UPSCALE=dlss: the TAA kept\n");
 	}
-	if (!g_dlss_wanted) {
+	if (!g_dlss_wanted && !g_taa_dlss_wanted) {
 		return;
 	}
 	if (const char* height = std::getenv("KYTY_UPSCALE_HEIGHT"); height != nullptr && *height != '\0') {
@@ -844,7 +907,7 @@ void InitializeUpscale() {
 	g_mv_sign         = sign != nullptr && std::atof(sign) > 0 ? 1.0f : -1.0f;
 	const char* mv    = std::getenv("KYTY_FRAMEGEN_MV");
 	g_mv_pixels       = mv != nullptr && std::string_view(mv) == "px";
-	if (g_bypass_wanted) {
+	if (g_bypass_wanted || g_taa_dlss_wanted) {
 		// (The fork's other ways, KYTY_TAA_BYPASS_MODE=copy or raw, darkened the picture: not ported.)
 		if (const char* mode = std::getenv("KYTY_TAA_BYPASS_MODE");
 		    mode != nullptr && *mode != '\0' && std::string_view(mode) != "match") {
@@ -855,16 +918,18 @@ void InitializeUpscale() {
 		g_bypass_match     = NumberSwitch("KYTY_TAA_MATCH", 1.0f) != 0.0f;
 		g_bypass_smoothing = std::clamp(NumberSwitch("KYTY_TAA_MATCH_SMOOTH", 0.1f), 0.001f, 1.0f);
 	}
-	const char* jitter = std::getenv("KYTY_UPSCALE_JITTER_SIGN");
-	g_jitter_sign      = jitter != nullptr && std::atof(jitter) < 0 ? -1.0f : 1.0f;
+	const char* jitter     = std::getenv("KYTY_UPSCALE_JITTER_SIGN");
+	g_jitter_sign          = jitter != nullptr && std::atof(jitter) < 0 ? -1.0f : 1.0f;
+	const char* taa_jitter = std::getenv("KYTY_TAA_JITTER_SIGN");
+	g_taa_jitter_sign      = taa_jitter != nullptr ? (std::atof(taa_jitter) < 0 ? -1.0f : 1.0f) : g_jitter_sign;
 }
 
 bool UpscaleWantsStreamline() {
-	return g_dlss_wanted;
+	return g_dlss_wanted || g_taa_dlss_wanted;
 }
 
 void UpscaleOnDevice(vk::PhysicalDevice physical_device) {
-	if (!g_dlss_wanted) {
+	if (!UpscaleWantsStreamline()) {
 		return;
 	}
 #ifdef KYTY_FRAMEGEN_STREAMLINE
@@ -885,15 +950,25 @@ void UpscaleOnDevice(vk::PhysicalDevice physical_device) {
 	// (The NGX DLSS version decides the presets: L and M need 310.5 or newer.)
 	sl::FeatureVersion version {};
 	const bool         known = g_api.get_feature_version(sl::kFeatureDLSS, version) == sl::Result::eOk;
-	g_upscale                = true;
+	g_upscale                = g_dlss_wanted;
+	g_taa_dlss               = g_taa_dlss_wanted;
 	g_taa_hooked             = true;
 	g_streamline_shared      = true;
-	char height[16] {"auto"};
-	if (g_output_height != 0) {
-		std::snprintf(height, sizeof(height), "%u", g_output_height);
+	Report("Upscaling: DLSS super resolution ready (NGX DLSS %s)\n",
+	       known ? version.versionNGX.toStr().c_str() : "of unknown version");
+	if (g_upscale) {
+		char height[16] {"auto"};
+		if (g_output_height != 0) {
+			std::snprintf(height, sizeof(height), "%u", g_output_height);
+		}
+		Report("Upscaling: the composite's 3D image upscaled by DLSS to a height of %s (KYTY_UPSCALE=dlss)\n", height);
 	}
-	Report("Upscaling: DLSS super resolution ready (NGX DLSS %s), output height %s\n",
-	       known ? version.versionNGX.toStr().c_str() : "of unknown version", height);
+	if (g_taa_dlss) {
+		Report("Upscaling: DLSS (DLAA) in the TAA's place (KYTY_TAA_REPLACE=dlss), its brightness matched to the "
+		       "TAA's (match %s, this frame's weight %.3f, fixed factor %.3f, jitter sign %+.0f)\n",
+		       g_bypass_match ? "on" : "off", static_cast<double>(g_bypass_smoothing),
+		       static_cast<double>(g_bypass_scale), static_cast<double>(g_taa_jitter_sign));
+	}
 	if (g_bypass_wanted) {
 		g_bypass = true;
 		Report("Upscaling: sin TAA (KYTY_TAA_REPLACE=upscaler): DLSS gets the raw jittered frame, its brightness "
@@ -917,17 +992,22 @@ void AfterTaaDispatch(CommandBuffer& command, std::span<const TextureBinding> im
 	}
 	const uint64_t flip = GuestFlips();
 	// The frame before ran the TAA pass, but none of its draws was found to be the composite.
-	if (g_snapshot.flip != UINT64_MAX && g_snapshot.flip + 1 == flip && g_composite_flip != g_snapshot.flip &&
-	    FirstRefusal(Refusal::NoComposite)) {
+	if (g_upscale && g_snapshot.flip != UINT64_MAX && g_snapshot.flip + 1 == flip &&
+	    g_composite_flip != g_snapshot.flip && FirstRefusal(Refusal::NoComposite)) {
 		Report("Upscaling: a frame with the TAA pass had no composite (a normal-path draw into a flip image sampling "
 		       "its 3D image): not upscaled\n");
 	}
-	if (g_upscale) {
+	if (g_upscale || g_taa_dlss) {
 		TakeSnapshot(command, images);
 	}
 	if (g_bypass) {
 		BypassTaa(command, images);
 	}
+#ifdef KYTY_FRAMEGEN_STREAMLINE
+	if (g_taa_dlss) {
+		DlaaTaa(command, images);
+	}
+#endif
 }
 
 void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std::span<TextureBinding> images) {
@@ -1017,7 +1097,7 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 	// After the game's TAA the 3D image is resolved, no jitter left in it; with sin TAA it is the raw frame's, made
 	// with the camera's jitter (a new history when that changes).
 	const bool     jittered = g_bypass && g_bypassed_flip == flip;
-	const auto     jitter   = jittered ? CameraJitter(render) : sl::float2(0.0f, 0.0f);
+	const auto     jitter   = jittered ? CameraJitter(render, g_jitter_sign) : sl::float2(0.0f, 0.0f);
 	const Resource in {&color->backing, scene->image_view, vk::ImageLayout::eShaderReadOnlyOptimal};
 	const Resource out {&target.image, target.view, vk::ImageLayout::eGeneral};
 	const bool     done = Evaluate(g_composite_port, vk_command, in, out, jitter,
@@ -1051,7 +1131,7 @@ void UpscaleComposite(CommandBuffer& command, const RenderState& rendering, std:
 }
 
 void DestroyUpscale(GraphicContext& graphics) {
-	for (auto* image: {&g_snapshot.depth, &g_snapshot.motion, &g_output}) {
+	for (auto* image: {&g_snapshot.depth, &g_snapshot.motion, &g_output, &g_dlaa}) {
 		if (*image != nullptr) {
 			Destroy(graphics, **image);
 			image->reset();

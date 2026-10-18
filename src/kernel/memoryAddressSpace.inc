@@ -2495,12 +2495,14 @@ private:
 	}
 
 	// NVIDIA's NGX takes host address space as the Vulkan device is made: for DLSS frame generation (KYTY_FRAMEGEN) and
-	// for DLSS super resolution without it (KYTY_UPSCALE=dlss, src/local/frame-gen-upscale.h).
+	// for DLSS super resolution without it (KYTY_UPSCALE=dlss, KYTY_TAA_REPLACE=dlss: src/local/frame-gen-upscale.h).
 	static bool NvidiaNgxWanted() {
 		const char* framegen = std::getenv("KYTY_FRAMEGEN");
 		const char* upscale  = std::getenv("KYTY_UPSCALE");
+		const char* taa      = std::getenv("KYTY_TAA_REPLACE");
 		return (framegen != nullptr && std::atoi(framegen) > 0) ||
-		       (upscale != nullptr && std::strcmp(upscale, "dlss") == 0);
+		       (upscale != nullptr && std::strcmp(upscale, "dlss") == 0) ||
+		       (taa != nullptr && std::strcmp(taa, "dlss") == 0);
 	}
 #endif
 

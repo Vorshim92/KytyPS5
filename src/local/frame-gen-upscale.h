@@ -18,6 +18,10 @@
 //     The TAA scales its history by a game constant, so the raw frame is scaled to the TAA output's mean luminance:
 //     KYTY_TAA_MATCH=0 not, KYTY_TAA_MATCH_SMOOTH=<w> this frame's weight in the gain (default 0.1),
 //     KYTY_TAA_BYPASS_GAIN=<f> a fixed factor on top. (The brightness still differs from the TAA's in places.)
+//   KYTY_TAA_REPLACE=dlss (with or without KYTY_UPSCALE): DLSS (DLAA, at the render size) in the TAA's place, on the
+//     TAA dispatch's raw jittered color with the camera's jitter (KYTY_TAA_JITTER_SIGN=-1 the other way round), its
+//     result written over the TAA output's color as sin TAA's raw frame is. No upscaling: the composite then scales
+//     the 3D image itself, or the upscaler does.
 //
 // Streamline is loaded as for DLSS-G (frame-gen.h, FrameGen::Initialize), with its DLSS plugin too, and also without
 // frame generation: it is then the process' Vulkan loader, DLSS-G off. DLSS evaluates in the game's command buffer on
@@ -37,7 +41,7 @@ namespace FrameGen {
 
 // KYTY_UPSCALE=dlss with DLSS available on the device (UpscaleOnDevice).
 extern bool g_upscale;
-// The TAA pass's images are wanted right after its dispatch (AfterTaaDispatch): the upscaler's.
+// The TAA pass's images are wanted right after its dispatch (AfterTaaDispatch): the upscaler's, DLAA's.
 extern bool g_taa_hooked;
 [[nodiscard]] inline bool UpscaleOn() noexcept {
 	return g_upscale;
