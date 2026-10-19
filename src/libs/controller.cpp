@@ -58,6 +58,17 @@ static bool TriggerHysteresis() {
 	return on;
 }
 
+// KYTY_PAD_TRIGGER_EFFECTS=0: no adaptive trigger effect reaches the DualSense, its triggers stay free (the game's calls
+// still succeed and scePadGetTriggerEffectState still answers from them), and a DualSense that becomes the active pad
+// gets one effect that turns both triggers off, whatever an earlier session left on them. Default 1: the game's effects.
+static bool TriggerEffectsOn() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_TRIGGER_EFFECTS");
+		return value == nullptr || std::string_view(value) != "0";
+	}();
+	return on;
+}
+
 // A trigger effect is sent to the DualSense only when it changes (GameController::SetTriggerEffect).
 // KYTY_PAD_EFFECT_CHANGES_ONLY=0: every scePadSetTriggerEffect sends its report, as before.
 static bool EffectChangesOnly() {
@@ -93,21 +104,6 @@ struct PadVibrationParam {
 	uint8_t small_motor;
 };
 
-struct PadTriggerEffectCommand {
-	uint32_t mode;
-	uint8_t  reserve[4];
-	uint8_t  data[48];
-};
-
-struct PadTriggerEffectParam {
-	uint8_t                 trigger_mask;
-	uint8_t                 reserve[7];
-	PadTriggerEffectCommand command[2];
-};
-
-static_assert(sizeof(PadTriggerEffectCommand) == 56);
-static_assert(sizeof(PadTriggerEffectParam) == 120);
-
 struct DualSenseEffects {
 	uint8_t enable_bits;
 	uint8_t reserve[9];
@@ -116,6 +112,18 @@ struct DualSenseEffects {
 };
 
 static_assert(sizeof(DualSenseEffects) == 32);
+
+// Both triggers' effect off on a DualSense (mode 0x05: no resistance and no vibration, the effect of a released pad).
+static void SendTriggersOff(SDL_GameController* pad) {
+	if (pad == nullptr || SDL_GameControllerGetType(pad) != SDL_CONTROLLER_TYPE_PS5) {
+		return;
+	}
+	DualSenseEffects effect {};
+	effect.enable_bits      = 0x0c;
+	effect.right_trigger[0] = 0x05;
+	effect.left_trigger[0]  = 0x05;
+	(void)SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
+}
 
 struct ControllerState {
 	struct Touch {
@@ -401,6 +409,11 @@ void GameController::CheckActive() {
 	m_first_state     = 0;
 	m_next_touch_id   = 1;
 	m_sent_effect_pad = -1;
+	// (Without trigger effects: the new pad's triggers free of whatever was set on them before. The keyboard and no pad:
+	// negative ids.)
+	if (!TriggerEffectsOn() && m_active_id >= 0) {
+		SendTriggersOff(SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id)));
+	}
 }
 
 // The history scePadRead returns, oldest unread first: a state per input event. Demon's Souls reads 64 each tick and
@@ -559,13 +572,7 @@ void GameController::ReleaseHostPads() {
 		}
 		if (auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(id));
 		    pad != nullptr) {
-			if (SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5) {
-				DualSenseEffects effect {};
-				effect.enable_bits     = 0x0c;
-				effect.right_trigger[0] = 0x05;
-				effect.left_trigger[0]  = 0x05;
-				(void)SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
-			}
+			SendTriggersOff(pad);
 			(void)SDL_GameControllerRumble(pad, 0, 0, 0);
 			(void)SDL_GameControllerSetLED(pad, 0, 0, 0);
 			pads.push_back(pad);
@@ -637,6 +644,9 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
 	// Remember it for scePadGetTriggerEffectState even when no DualSense takes it: a game that polls
 	// the state has to see the effect it asked for, not a zero.
 	m_state_effect = param;
+	if (!TriggerEffectsOn()) {
+		return true;
+	}
 	auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id));
 	if (pad != nullptr && SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5) {
 		// Each effect is an output report (78 bytes over Bluetooth, which SDL sends however often it is asked: unlike
