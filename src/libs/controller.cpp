@@ -18,7 +18,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 namespace Libs::Controller {
@@ -30,6 +32,17 @@ constexpr int PAD_ERROR_INVALID_HANDLE = -2137915389; /* 0x80920003 */
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
+constexpr uint64_t EFFECT_REFRESH_MS  = 5000;
+
+// A trigger effect is sent to the DualSense only when it changes (GameController::SetTriggerEffect).
+// KYTY_PAD_EFFECT_CHANGES_ONLY=0: every scePadSetTriggerEffect sends its report, as before.
+static bool EffectChangesOnly() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_EFFECT_CHANGES_ONLY");
+		return value == nullptr || std::string_view(value) != "0";
+	}();
+	return on;
+}
 
 struct PadControllerInformation {
 	float    touch_pixel_density;
@@ -134,8 +147,14 @@ private:
 	uint32_t         m_first_state   = 0;
 	uint8_t          m_next_touch_id = 1;
 	// Every effect the game set, whether or not the host pad could reproduce it:
-	// scePadGetTriggerEffectState answers from it (m_trigger_sent keeps the sent one only).
+	// scePadGetTriggerEffectState answers from it (m_sent_effect keeps the sent one only).
 	PadTriggerEffectParam m_state_effect {};
+	// The trigger effects last sent to a DualSense (EffectChangesOnly): to which pad (-1: none), which triggers
+	// (DualSenseEffects enable bits) and when (SDL ticks).
+	int              m_sent_effect_pad   = -1;
+	uint8_t          m_sent_effect_bits  = 0;
+	DualSenseEffects m_sent_effect {};
+	uint64_t         m_sent_effect_ticks = 0;
 };
 
 static GameController* g_controller = nullptr;
@@ -343,12 +362,13 @@ void GameController::CheckActive() {
 	if (!m_connected && new_connected) {
 		m_connected_count++;
 	}
-	m_active_id     = new_active_id;
-	m_connected     = new_connected;
-	m_state         = {};
-	m_states_num    = 0;
-	m_first_state   = 0;
-	m_next_touch_id = 1;
+	m_active_id       = new_active_id;
+	m_connected       = new_connected;
+	m_state           = {};
+	m_states_num      = 0;
+	m_first_state     = 0;
+	m_next_touch_id   = 1;
+	m_sent_effect_pad = -1;
 }
 
 void GameController::AddState() {
@@ -478,6 +498,7 @@ void GameController::ReleaseHostPads() {
 	}
 
 	m_connected_ids.clear();
+	m_sent_effect_pad = -1;
 }
 
 void GameController::SetVibration(uint8_t large_motor, uint8_t small_motor) {
@@ -535,7 +556,41 @@ bool GameController::SetTriggerEffect(const PadTriggerEffectParam& param) {
 	m_state_effect = param;
 	auto* pad = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(m_active_id));
 	if (pad != nullptr && SDL_GameControllerGetType(pad) == SDL_CONTROLLER_TYPE_PS5) {
-		(void)SDL_GameControllerSendEffect(pad, &effect, sizeof(effect));
+		// Each effect is an output report (78 bytes over Bluetooth, which SDL sends however often it is asked: unlike
+		// rumble and the light bar it has no change check) that the pad takes between its input reports. A trigger whose
+		// effect is the one last sent to this pad is left out, a call that changes neither sends nothing, and every
+		// EFFECT_REFRESH_MS the triggers a call sets are sent again, in case the pad lost them.
+		const bool changes_only = EffectChangesOnly();
+		if (changes_only) {
+			const auto now = SDL_GetTicks64();
+			if (m_sent_effect_pad != m_active_id || now - m_sent_effect_ticks >= EFFECT_REFRESH_MS) {
+				m_sent_effect_pad  = m_active_id;
+				m_sent_effect_bits = 0;
+			}
+			const auto unchanged = [&](uint8_t bit, const uint8_t* sent, const uint8_t* wanted) {
+				return (effect.enable_bits & bit) != 0 && (m_sent_effect_bits & bit) != 0 &&
+				       std::memcmp(sent, wanted, sizeof(effect.left_trigger)) == 0;
+			};
+			if (unchanged(0x08, m_sent_effect.left_trigger, effect.left_trigger)) {
+				effect.enable_bits &= ~0x08;
+			}
+			if (unchanged(0x04, m_sent_effect.right_trigger, effect.right_trigger)) {
+				effect.enable_bits &= ~0x04;
+			}
+			if (effect.enable_bits == 0) {
+				return true;
+			}
+		}
+		if (SDL_GameControllerSendEffect(pad, &effect, sizeof(effect)) == 0 && changes_only) {
+			if ((effect.enable_bits & 0x08) != 0) {
+				std::memcpy(m_sent_effect.left_trigger, effect.left_trigger, sizeof(effect.left_trigger));
+			}
+			if ((effect.enable_bits & 0x04) != 0) {
+				std::memcpy(m_sent_effect.right_trigger, effect.right_trigger, sizeof(effect.right_trigger));
+			}
+			m_sent_effect_bits |= effect.enable_bits;
+			m_sent_effect_ticks = SDL_GetTicks64();
+		}
 	}
 	return true;
 }
