@@ -1,5 +1,5 @@
-// The trigger effects as the game sees them (src/libs/controller.cpp): scePadSetTriggerEffect and
-// scePadGetTriggerEffectState.
+// Pad input and output as the game sees them (src/libs/controller.cpp): the state history scePadRead gives and the
+// trigger effects.
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/subsystems.h"
@@ -19,6 +19,37 @@ void Check(bool value, const char *text) {
     std::fprintf(stderr, "PadInputTests: failed: %s\n", text);
     std::abort();
   }
+}
+
+// The unread states, oldest first (Demon's Souls reads 64 a tick).
+int Read(PadData *data) { return PadRead(1, data, 64); }
+
+// A tap, then far more stick events before the next read than the history holds: the read still has the press and
+// the release, and its newest state the sticks' last values (KYTY_PAD_STATE_COALESCE).
+void CheckTapAcrossStickBurst() {
+  static PadData data[64];
+  (void)Read(data);
+  SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, true);
+  for (int i = 0; i < 200; i++) {
+    SetAxis(HOST_INPUT_CONTROLLER_ID, Axis::LeftX, 100 + i % 50);
+  }
+  SetButton(HOST_INPUT_CONTROLLER_ID, PAD_BUTTON_CROSS, false);
+  for (int i = 0; i < 200; i++) {
+    SetAxis(HOST_INPUT_CONTROLLER_ID, Axis::LeftX, 150 - i % 50);
+  }
+  const int count = Read(data);
+  bool pressed = false;
+  bool released_after = false;
+  for (int i = 0; i < count; i++) {
+    if ((data[i].buttons & PAD_BUTTON_CROSS) != 0) {
+      pressed = true;
+    } else if (pressed) {
+      released_after = true;
+    }
+  }
+  Check(pressed && released_after, "a tap between two reads keeps its press and its release");
+  Check(count > 0 && data[count - 1].left_stick_x == 150 - 199 % 50,
+        "the newest state has the sticks' last values");
 }
 
 // scePadSetTriggerEffect succeeds whether or not effects reach a pad (KYTY_PAD_TRIGGER_EFFECTS, 0: none), and the
@@ -54,6 +85,7 @@ int main() {
   subsystems.Initialize<Log::Lifecycle>();
 
   Libs::Controller::Initialize();
+  CheckTapAcrossStickBurst();
   CheckTriggerEffects();
   Libs::Controller::Shutdown();
   subsystems.Destroy();
