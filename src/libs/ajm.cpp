@@ -178,7 +178,7 @@ int KYTY_SYSV_ABI AjmDecAt9ParseConfigData(const void*              config_data,
 	At9MultiConfig  multi {};
 	const bool      is_multi = At9ParseMultiConfig(config, &multi);
 	Atrac9CodecInfo codec_info {};
-	const int       init_result = Atrac9InitDecoder(handle, is_multi ? multi.mono : config);
+	const int       init_result = is_multi ? Atrac9InitDecoder(handle, multi.mono) : At9InitDecoder(handle, config);
 	const int       info_result =
 	    init_result == 0 ? Atrac9GetCodecInfo(handle, &codec_info) : init_result;
 	Atrac9ReleaseHandle(handle);

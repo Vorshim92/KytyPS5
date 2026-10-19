@@ -9,6 +9,7 @@
 #include "common/threads.h"
 #include "kernel/pthread.h"
 #include "kernel/semaphore.h"
+#include "libs/ajm/atrac9_config.h"
 #include "libs/audio_internal.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
@@ -2816,14 +2817,16 @@ static int Ngs2ParseAtrac9Riff(const void* data, size_t data_size, Ngs2WaveformI
 
 	std::array<uint8_t, ATRAC9_CONFIG_DATA_SIZE> config {};
 	std::memcpy(config.data(), format + 44, config.size());
-	if (config[0] != 0xfe || (config[1] & 1u) != 0 || ((config[1] >> 1u) & 7u) >= 6u) {
+	// (A DualSense vibration layout, channel field 6 or 7, as its mono or dual mono one: Ajm::At9VibrationAsMono.)
+	if (config[0] != 0xfe || (config[1] & 1u) != 0 ||
+	    (!Ajm::At9VibrationAsMono() && ((config[1] >> 1u) & 7u) >= 6u)) {
 		return NGS2_ERROR_INVALID_WAVEFORM_FORMAT;
 	}
 
 	Atrac9CodecInfo codec {};
 	void*           decoder = Atrac9GetHandle();
 	const bool valid_codec =
-	    decoder != nullptr && Atrac9InitDecoder(decoder, config.data()) == 0 &&
+	    decoder != nullptr && Ajm::At9InitDecoder(decoder, config.data()) == 0 &&
 	    Atrac9GetCodecInfo(decoder, &codec) == 0 && codec.channels > 0 &&
 	    codec.samplingRate > 0 && codec.superframeSize > 0 && codec.framesInSuperframe > 0 &&
 	    codec.frameSamples > 0 && codec.superframeSize % codec.framesInSuperframe == 0;

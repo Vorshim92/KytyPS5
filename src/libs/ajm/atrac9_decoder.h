@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "libs/ajm/atrac9_config.h"
 #include "libs/ajm/decoder.h"
 
 #include <algorithm>
@@ -327,7 +328,7 @@ private:
 				init_ret = Atrac9InitDecoder(handle, multi.mono);
 			}
 		} else {
-			init_ret = Atrac9InitDecoder(m_handle, m_config_data);
+			init_ret = At9InitDecoder(m_handle, m_config_data);
 		}
 		if (init_ret != 0) {
 			ReleaseChannelHandles();

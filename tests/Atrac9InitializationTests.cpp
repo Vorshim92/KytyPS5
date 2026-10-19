@@ -1,4 +1,5 @@
 #include "libatrac9.h"
+#include "libs/ajm/atrac9_config.h"
 
 #include <array>
 #include <barrier>
@@ -35,6 +36,24 @@ void CheckConfig(void* handle, unsigned rate_index, unsigned channels, unsigned 
 	          info.superframeSize == (256u << superframe),
 	      "another decoder configuration leaked into this handle");
 }
+
+// The DualSense vibration layouts (channel field 6 and 7) decode as mono and dual mono (Ajm::At9InitDecoder), the
+// guest's config unchanged.
+void CheckVibrationConfigs() {
+	auto* handle = Atrac9GetHandle();
+	Check(handle != nullptr, "allocation failed");
+	for (unsigned index: {6u, 7u}) {
+		std::array<unsigned char, 4> config {0xfe, static_cast<unsigned char>(0x70u | (index << 1u)), 0x03, 0xf0};
+		const auto original = config;
+		Check(Libs::Audio::Ajm::At9InitDecoder(handle, config.data()) == 0, "vibration config rejected");
+		Atrac9CodecInfo info {};
+		Check(Atrac9GetCodecInfo(handle, &info) == 0 && info.channels == static_cast<int>(index) - 5 &&
+		          info.samplingRate == 48000 && info.frameSamples == 256 && info.framesInSuperframe == 4 &&
+		          info.superframeSize == 128 && config == original,
+		      "vibration config returned another geometry or changed the guest's config");
+	}
+	Atrac9ReleaseHandle(handle);
+}
 } // namespace
 
 int main() {
@@ -61,5 +80,6 @@ int main() {
 		});
 	}
 	workers.clear();
+	CheckVibrationConfigs();
 	std::puts("ATRAC9 concurrent initialization and per-handle configuration passed");
 }
