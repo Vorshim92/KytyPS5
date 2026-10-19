@@ -36,13 +36,15 @@ uint32_t TranslatorDeviceFeatures() {
 
 uint32_t TranslatorFeatureSet() {
 	// (KYTY_LANE_LOCAL_COOP=0/1: the cooperative halves off or on, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads
-	// at the entry or where they are read, whatever the store was made with and the GPU allows.)
+	// at the entry or where they are read, KYTY_CLAMP_NAN_ZERO=0/1 the clamp modifier's NaN as it is or 0, whatever the
+	// store was made with and the GPU allows.)
 	const auto forced = [](const char* name) {
 		const char* value = std::getenv(name);
 		return value == nullptr ? -1 : std::string_view(value) != "0" ? 1 : 0;
 	};
-	static const int cooperative  = forced("KYTY_LANE_LOCAL_COOP");
-	static const int slots_at_use = forced("KYTY_TABLE_SLOTS_AT_USE");
+	static const int cooperative    = forced("KYTY_LANE_LOCAL_COOP");
+	static const int slots_at_use   = forced("KYTY_TABLE_SLOTS_AT_USE");
+	static const int clamp_nan_zero = forced("KYTY_CLAMP_NAN_ZERO");
 	const auto       stored       = g_translator_features.load(std::memory_order_relaxed);
 	auto             features     = (stored & g_device_features.load(std::memory_order_relaxed)) |
 	                     g_device_required.load(std::memory_order_relaxed);
@@ -51,6 +53,7 @@ uint32_t TranslatorFeatureSet() {
 	};
 	apply(cooperative, TranslatorFeatureCooperativeHalves);
 	apply(slots_at_use, TranslatorFeatureTableSlotsAtUse);
+	apply(clamp_nan_zero, TranslatorFeatureClampNanZero);
 	return features;
 }
 
@@ -1020,6 +1023,9 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	IR::Program result;
 	result.stage               = options.stage;
 	result.wave_size           = options.wave_size;
+	// The translation features the backend takes from the program (TranslatorFeatureSet).
+	const auto features        = TranslatorFeatureSet();
+	result.clamp_nan_zero      = (features & TranslatorFeatureClampNanZero) != 0;
 	if (options.stage == ShaderType::Compute && options.wave_size == 64u) {
 		// (KYTY_LANE_LOCAL=0: every wave64 program two lanes per invocation, as before; KYTY_LANE_LOCAL_LOG: why not.)
 		static const bool enabled = [] {

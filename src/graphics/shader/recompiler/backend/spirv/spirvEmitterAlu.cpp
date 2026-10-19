@@ -378,11 +378,18 @@ bool EmitValueAlu(ValueEmitContext& ctx, const IR::Inst& inst) {
 		case IR::ValueOpcode::FPNeg32:
 			ctx.Define(inst, EmitFNegateValue(state, ctx.Arg(inst, 0)));
 			return true;
-		case IR::ValueOpcode::FPSaturate32:
-			ctx.Define(inst, EmitExt(state, TypeF32(state), GlslFClamp,
-			                         {ctx.Arg(inst, 0), ConstantF32(state, 0),
-			                          ConstantF32(state, 0x3f800000u)}));
+		case IR::ValueOpcode::FPSaturate32: {
+			const auto clamped = EmitExt(state, TypeF32(state), GlslFClamp,
+			                             {ctx.Arg(inst, 0), ConstantF32(state, 0),
+			                              ConstantF32(state, 0x3f800000u)});
+			// The clamp modifier runs in DX10 clamp mode (every graphics shader's SPI_SHADER_PGM_RSRC1.DX10_CLAMP:
+			// ps_check, vs_check): NaN becomes 0. FClamp leaves the result of NaN undefined.
+			ctx.Define(inst, state.program.clamp_nan_zero
+			                     ? Select(state, TypeF32(state), EmitClassifyF32(state, ctx.Arg(inst, 0)).nan,
+			                              ConstantF32(state, 0), clamped)
+			                     : clamped);
 			return true;
+		}
 		case IR::ValueOpcode::BitFieldInsert:
 			ctx.Emit(inst, OpBitFieldInsert, IR::Type::U32,
 			         {ctx.Arg(inst, 0), ctx.Arg(inst, 1), ctx.Arg(inst, 2), ctx.Arg(inst, 3)});

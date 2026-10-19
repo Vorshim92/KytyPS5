@@ -724,6 +724,9 @@ struct Program: ResourcePlan {
 	// Table mode: each slot loaded where the shader reads it (Frontend::TranslatorFeatureTableSlotsAtUse), not all of
 	// them at the entry.
 	bool                          table_slots_at_use = false;
+	// The f32 clamp modifier (FPSaturate32) turns NaN into 0, as RDNA's DX10 clamp mode does
+	// (Frontend::TranslatorFeatureClampNanZero); else NaN goes through FClamp, whose result for it is undefined.
+	bool                          clamp_nan_zero = false;
 
 	std::optional<SpirvRequirements> spirv_requirements;
 };

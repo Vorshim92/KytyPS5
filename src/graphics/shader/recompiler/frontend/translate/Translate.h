@@ -66,9 +66,13 @@ bool ProveWaveLaneLocal(const Decoder::Program& program, bool cooperative, LaneL
 constexpr uint32_t TranslatorFeatureCooperativeHalves = 1u; // LaneLocal.cpp's cooperative halves (9935d547)
 constexpr uint32_t TranslatorFeatureTableSlotsAtUse   = 2u; // a table mode slot loaded where the shader reads it
 constexpr uint32_t TranslatorFeatures = TranslatorFeatureCooperativeHalves | TranslatorFeatureTableSlotsAtUse;
-// Those the translation uses (default: all; the emulator sets those its static store was made with before it translates
-// anything). KYTY_LANE_LOCAL_COOP=0/1 overrides the cooperative halves either way, KYTY_TABLE_SLOTS_AT_USE=0/1 the
-// table slots' loads.
+// Opt-in translation features: off unless their variable is 1, in the emulator and the precompile alike. No static
+// store is stamped with them (TranslatorFeatures holds none), so a store made without them stays current; with one
+// on, the programs it changes are compiled at their first use (or precompiled, with the variable set there too).
+constexpr uint32_t TranslatorFeatureClampNanZero     = 4u;  // the f32 clamp modifier's NaN is 0 (KYTY_CLAMP_NAN_ZERO)
+// Those the translation uses (default: all of TranslatorFeatures and none of the opt-in ones; the emulator sets those
+// its static store was made with before it translates anything). KYTY_LANE_LOCAL_COOP=0/1 overrides the cooperative
+// halves either way, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads, an opt-in feature's variable that feature.
 void                   SetTranslatorFeatures(uint32_t features);
 [[nodiscard]] uint32_t TranslatorFeatureSet();
 // Those this GPU's translation may use (default: all) and those it uses whatever the store was made with (`required`,
