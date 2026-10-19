@@ -45,6 +45,19 @@ static bool StateCoalescing() {
 	return on;
 }
 
+// L2/R2 as buttons: pressed from TRIGGER_PRESS_TRAVEL, released at TRIGGER_RELEASE_TRAVEL or below (GameController::Axis).
+// KYTY_PAD_TRIGGER_HYSTERESIS=0: any travel above 0 presses, as before.
+constexpr int TRIGGER_PRESS_TRAVEL   = 8;
+constexpr int TRIGGER_RELEASE_TRAVEL = 4;
+
+static bool TriggerHysteresis() {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_PAD_TRIGGER_HYSTERESIS");
+		return value == nullptr || std::string_view(value) != "0";
+	}();
+	return on;
+}
+
 // A trigger effect is sent to the DualSense only when it changes (GameController::SetTriggerEffect).
 // KYTY_PAD_EFFECT_CHANGES_ONLY=0: every scePadSetTriggerEffect sends its report, as before.
 static bool EffectChangesOnly() {
@@ -478,7 +491,13 @@ void GameController::Axis(int id, Controller::Axis axis, int value) {
 			trigger = PAD_BUTTON_R2;
 		}
 		if (trigger != 0) {
-			m_state.buttons = value > 0 ? m_state.buttons | trigger : m_state.buttons & ~trigger;
+			// A worn trigger can rest a few steps above 0: with any travel a press, that was a phantom L2 or R2 (in
+			// Demon's Souls a parry or a heavy attack). TriggerEffectState takes travel below 8 for released too.
+			const bool held    = (m_state.buttons & trigger) != 0;
+			const bool pressed = TriggerHysteresis()
+			                         ? value >= TRIGGER_PRESS_TRAVEL || (held && value > TRIGGER_RELEASE_TRAVEL)
+			                         : value > 0;
+			m_state.buttons    = pressed ? m_state.buttons | trigger : m_state.buttons & ~trigger;
 		}
 
 		AddState();

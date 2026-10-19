@@ -1,4 +1,4 @@
-// Pad input as scePadRead gives it to the game (src/libs/controller.cpp): the state history.
+// Pad input as scePadRead gives it to the game (src/libs/controller.cpp): the state history and L2/R2 as buttons.
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/subsystems.h"
@@ -51,6 +51,24 @@ void CheckTapAcrossStickBurst() {
         "the newest state has the sticks' last values");
 }
 
+// L2 pressed from a travel of 8, held down to 5, released at 4; a trigger resting at 2 presses nothing
+// (KYTY_PAD_TRIGGER_HYSTERESIS).
+void CheckTriggerButtons() {
+  static PadData data[64];
+  const auto l2_after = [&](int travel) {
+    SetAxis(HOST_INPUT_CONTROLLER_ID, Axis::TriggerLeft, travel);
+    const int count = Read(data);
+    return count > 0 && (data[count - 1].buttons & PAD_BUTTON_L2) != 0;
+  };
+  Check(!l2_after(2), "a trigger resting at 2 is no L2 press");
+  Check(l2_after(8), "a travel of 8 presses L2");
+  Check(l2_after(5), "L2 stays held down to a travel of 5");
+  Check(!l2_after(4), "L2 is released at a travel of 4");
+  Check(!l2_after(6), "a travel of 6 from released presses nothing");
+  Check(l2_after(255), "a full travel presses L2");
+  Check(!l2_after(0), "a released trigger releases L2");
+}
+
 } // namespace
 
 int main() {
@@ -64,6 +82,7 @@ int main() {
 
   Libs::Controller::Initialize();
   CheckTapAcrossStickBurst();
+  CheckTriggerButtons();
   Libs::Controller::Shutdown();
   subsystems.Destroy();
 
