@@ -29,6 +29,10 @@ namespace Libs::LibKernelApr {
 void InitLibKernel_1_Apr(Loader::SymbolDatabase *symbols);
 }
 
+namespace Libs::LibAmpr {
+void InitAmpr_1(Loader::SymbolDatabase *symbols);
+}
+
 namespace {
 
 namespace FileSystem = Libs::LibKernel::FileSystem;
@@ -302,6 +306,82 @@ void CheckAprPaths(const std::filesystem::path &root) {
   FileSystem::Umount("/app0");
 }
 
+// A write of a literal to an address takes the size its measure gives (8, 12 or 16 bytes by the value), fits a
+// command buffer of exactly that size, and its submission writes all 64 bits.
+void CheckAprWriteAddressSizes() {
+  Loader::SymbolDatabase symbols;
+  Libs::LibAmpr::InitAmpr_1(&symbols);
+  Libs::LibKernelApr::InitLibKernel_1_Apr(&symbols);
+  const auto find = [&](const char *nid) {
+    const auto *symbol = symbols.FindByNid(nid, Loader::SymbolType::Func);
+    Check(symbol != nullptr, "AMPR write and submission exports are registered");
+    return symbol->vaddr;
+  };
+  using Unary = void (KYTY_SYSV_ABI *)(void *);
+  using AprConstructor = void (KYTY_SYSV_ABI *)(void *, void *, void *);
+  using SetBuffer = int (KYTY_SYSV_ABI *)(void *, void *, uint32_t);
+  using Offset = uint64_t (KYTY_SYSV_ABI *)(void *);
+  using WriteAddress = int (KYTY_SYSV_ABI *)(void *, volatile uint64_t *, uint64_t);
+  using WriteImmediately = int (KYTY_SYSV_ABI *)(void *, volatile uint64_t *, uint64_t, uint32_t);
+  using MeasureWriteAddress = uint64_t (KYTY_SYSV_ABI *)(volatile uint64_t *, uint64_t);
+  using MeasureWriteImmediately = uint64_t (KYTY_SYSV_ABI *)(volatile uint64_t *, uint64_t, uint32_t);
+  struct Result {
+    int32_t result;
+    uint32_t error_offset;
+  };
+  using SubmitApr = int (KYTY_SYSV_ABI *)(void *, uint32_t, Result *, uint32_t *);
+  using WaitSubmission = int (KYTY_SYSV_ABI *)(uint32_t);
+  const auto construct = reinterpret_cast<Unary>(find("8aI7R7WaOlc"));
+  const auto construct_apr = reinterpret_cast<AprConstructor>(find("a8uLzYY--tM"));
+  const auto destroy = reinterpret_cast<Unary>(find("GuchCTefuZw"));
+  const auto set_buffer = reinterpret_cast<SetBuffer>(find("N-FSPA4S3nI"));
+  const auto offset = reinterpret_cast<Offset>(find("GnxKOHEawhk"));
+  const auto write_address = reinterpret_cast<WriteAddress>(find("sJXyWHjP-F8"));
+  const auto write_immediately = reinterpret_cast<WriteImmediately>(find("j0+3uJMxYJY"));
+  const auto measure_write_address = reinterpret_cast<MeasureWriteAddress>(find("C+IEj+BsAFM"));
+  const auto measure_write_immediately =
+      reinterpret_cast<MeasureWriteImmediately>(find("4fgtGfXDrFc"));
+  const auto submit_apr = reinterpret_cast<SubmitApr>(find("ASoW5WE-UPo"));
+  const auto wait_apr = reinterpret_cast<WaitSubmission>(find("rqwFKI4PAiM"));
+  struct LiteralWrite {
+    uint64_t value;
+    uint32_t size;
+  };
+  constexpr std::array literal_writes{
+      LiteralWrite{0, 8},  LiteralWrite{3, 8},
+      LiteralWrite{4, 12}, LiteralWrite{(uint64_t{1} << 34) - 1, 12},
+      LiteralWrite{uint64_t{1} << 34, 16}, LiteralWrite{UINT64_MAX, 16}};
+  for (const auto &literal : literal_writes) {
+    for (const bool immediately : std::array{false, true}) {
+      std::array<uint64_t, 5> header{};
+      std::array<uint32_t, 8> data{};
+      construct(header.data());
+      construct_apr(header.data(), &header[3], &header[4]);
+      Check(set_buffer(header.data(), data.data(), literal.size) == OK,
+            "initialize AMPR command buffer");
+      uint64_t fence = ~literal.value;
+      const auto append = [&](uint64_t value) {
+        return immediately ? write_immediately(header.data(), &fence, value, 1)
+                           : write_address(header.data(), &fence, value);
+      };
+      Check(measure_write_address(&fence, literal.value) == literal.size &&
+                measure_write_immediately(&fence, literal.value, 1) == literal.size &&
+                append(literal.value) == OK && offset(header.data()) == literal.size,
+            "literal write fits exactly its measured command size");
+      Check(append(~literal.value) == Libs::LibKernel::KERNEL_ERROR_EBUSY &&
+                offset(header.data()) == literal.size,
+            "rejected write preserves the full command buffer offset");
+      Result result{1234, 5678};
+      uint32_t submission = 0;
+      Check(submit_apr(header.data(), 3, &result, &submission) == OK &&
+                wait_apr(submission) == OK && result.result == OK &&
+                fence == literal.value,
+            "bounded write preserves all sixty-four literal bits");
+      destroy(header.data());
+    }
+  }
+}
+
 void CheckSocketWakeup() {
   namespace Net = Libs::Network::Net;
   // Guest sockaddr_in: length, family, network-order port/address, padding.
@@ -391,6 +471,7 @@ int main() {
   CheckMountRoot(temporary.Path());
   CheckDirectoryStream(temporary.Path());
   CheckAprPaths(temporary.Path());
+  CheckAprWriteAddressSizes();
   FileSystem::Mount(temporary.Path(), "/savedata0");
   CheckSaveRename(temporary.Path(), "first-save");
   CheckSaveRename(temporary.Path(), "replacement-save");
