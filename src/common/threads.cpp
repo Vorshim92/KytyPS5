@@ -7,7 +7,9 @@
 #include <cerrno>
 #include <chrono>             // IWYU pragma: keep
 #include <condition_variable> // IWYU pragma: keep
+#include <cstdlib>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS && KYTY_COMPILER == KYTY_COMPILER_CLANG
@@ -205,6 +207,19 @@ static std::recursive_mutex                         g_cond_waiters_mutex;
 static std::vector<std::pair<int, CondVarPrivate*>> g_cond_waiters;
 static wait_poll_func_t                             g_cond_wait_poll_callback = nullptr;
 
+// The registry of every condition wait (thread, condition variable), through which KernelRaiseException woke the waits
+// of the thread it signals (SignalThread): every Wait and WaitFor took its global lock twice, and a signal delivered on a
+// thread that held it (Windows: a special user APC runs at any point) deadlocked with the raising thread, blocked on it
+// in SignalThread. The signal reaches the thread without it (the APC, or pthread_kill, and PthreadWakeForSignal), so
+// waits are not registered. KYTY_COND_WAIT_NO_REGISTRY=0: registered and woken as before.
+static bool CondWaitRegistry() {
+	static const bool registry = [] {
+		const char* value = std::getenv("KYTY_COND_WAIT_NO_REGISTRY");
+		return value != nullptr && std::string_view(value) == "0";
+	}();
+	return registry;
+}
+
 static void WakeCondVar(CondVarPrivate* cond_var) {
 #ifdef KYTY_WIN_CS
 	static auto func = ResolveWakeAllConditionVariable();
@@ -216,11 +231,17 @@ static void WakeCondVar(CondVarPrivate* cond_var) {
 }
 
 static void RegisterCondWaiter(CondVarPrivate* cond_var) {
+	if (!CondWaitRegistry()) {
+		return;
+	}
 	std::lock_guard lock(g_cond_waiters_mutex);
 	g_cond_waiters.emplace_back(Thread::GetThreadIdUnique(), cond_var);
 }
 
 static void UnregisterCondWaiter(CondVarPrivate* cond_var) {
+	if (!CondWaitRegistry()) {
+		return;
+	}
 	const auto      thread_id = Thread::GetThreadIdUnique();
 	std::lock_guard lock(g_cond_waiters_mutex);
 
@@ -478,6 +499,9 @@ void CondVar::SignalAll() {
 }
 
 void CondVar::SignalThread(int thread_id) {
+	if (!CondWaitRegistry()) {
+		return;
+	}
 	std::lock_guard lock(g_cond_waiters_mutex);
 	for (const auto& waiter: g_cond_waiters) {
 		if (waiter.first == thread_id) {
