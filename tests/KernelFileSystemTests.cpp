@@ -1,3 +1,5 @@
+// (The test's own main, not SDL_main: the target links no SDL2main.)
+#define SDL_MAIN_HANDLED
 #include "SDL.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
