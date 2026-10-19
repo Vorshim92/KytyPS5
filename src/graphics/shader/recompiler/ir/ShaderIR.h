@@ -730,6 +730,9 @@ struct Program: ResourcePlan {
 	// A float's NaN test (EmitClassifyF32Bits) is one comparison of its magnitude with infinity's
 	// (Frontend::TranslatorFeatureNanOneCompare), the same answer as its exponent and mantissa tests in fewer instructions.
 	bool                          nan_one_compare = false;
+	// V_PK_MIN_F16 / V_PK_MAX_F16 return a half quieted as a signaling NaN only with its quiet bit clear
+	// (Frontend::TranslatorFeaturePkMinMaxQuietNan): for a quiet NaN with payload bits they return the other operand.
+	bool                          pk_minmax_quiet_nan = false;
 
 	std::optional<SpirvRequirements> spirv_requirements;
 };

@@ -25,9 +25,13 @@ bool Translator::PackedFloat16(const Decoder::Instruction& inst, IR::ValueOpcode
 	raw.clamp   = false;
 	auto result = PackHalf2x16(translate_lane(false), translate_lane(true));
 	if (quiet_snan) {
-		const auto quiet_snan_lane = [&](const Decoder::Operand& operand, bool high) {
+		// A signaling NaN: all-ones exponent, quiet bit (0x200) clear, a nonzero payload. Without
+		// IR::Program::pk_minmax_quiet_nan the quiet bit is not tested: a quiet NaN with payload bits (0x7e01) is
+		// taken for one.
+		const uint32_t nan_bits        = program.pk_minmax_quiet_nan ? 0x7e00u : 0x7c00u;
+		const auto     quiet_snan_lane = [&](const Decoder::Operand& operand, bool high) {
 			const auto bits     = ReadU16LaneAsU32(operand, high, false);
-			const auto exponent = ir.BitwiseAnd(bits, IR::U32(IR::Value(0x7c00u)));
+			const auto exponent = ir.BitwiseAnd(bits, IR::U32(IR::Value(nan_bits)));
 			const auto payload  = ir.BitwiseAnd(bits, IR::U32(IR::Value(0x01ffu)));
 			const auto snan     = ir.LogicalAnd(ir.IEqual(exponent, IR::U32(IR::Value(0x7c00u))),
 			                                    ir.INotEqual(payload, IR::U32(IR::Value(0u))));
