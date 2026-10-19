@@ -727,6 +727,9 @@ struct Program: ResourcePlan {
 	// The f32 clamp modifier (FPSaturate32) turns NaN into 0, as RDNA's DX10 clamp mode does
 	// (Frontend::TranslatorFeatureClampNanZero); else NaN goes through FClamp, whose result for it is undefined.
 	bool                          clamp_nan_zero = false;
+	// A float's NaN test (EmitClassifyF32Bits) is one comparison of its magnitude with infinity's
+	// (Frontend::TranslatorFeatureNanOneCompare), the same answer as its exponent and mantissa tests in fewer instructions.
+	bool                          nan_one_compare = false;
 
 	std::optional<SpirvRequirements> spirv_requirements;
 };

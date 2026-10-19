@@ -217,13 +217,18 @@ uint32_t EmitLogicalNotBool(EmitterState& state, uint32_t value) {
 
 F32Class EmitClassifyF32Bits(EmitterState& state, uint32_t bits) {
 	F32Class cls;
-	cls.bits                 = bits;
-	const auto abs_bits      = EmitAndConstant(state, cls.bits, 0x7fffffffu);
-	const auto exponent_bits = EmitAndConstant(state, abs_bits, 0x7f800000u);
-	const auto mantissa_bits = EmitAndConstant(state, abs_bits, 0x007fffffu);
-	const auto exponent_max  = EmitCompareU32Constant(state, OpIEqual, exponent_bits, 0x7f800000u);
-	const auto mantissa_nonzero = EmitCompareU32Constant(state, OpINotEqual, mantissa_bits, 0);
-	cls.nan  = EmitLogicalAndBool(state, exponent_max, mantissa_nonzero);
+	cls.bits            = bits;
+	const auto abs_bits = EmitAndConstant(state, cls.bits, 0x7fffffffu);
+	if (state.program.nan_one_compare) {
+		// A NaN's magnitude is above infinity's (all-ones exponent, nonzero mantissa).
+		cls.nan = EmitCompareU32Constant(state, OpUGreaterThan, abs_bits, 0x7f800000u);
+	} else {
+		const auto exponent_bits    = EmitAndConstant(state, abs_bits, 0x7f800000u);
+		const auto mantissa_bits    = EmitAndConstant(state, abs_bits, 0x007fffffu);
+		const auto exponent_max     = EmitCompareU32Constant(state, OpIEqual, exponent_bits, 0x7f800000u);
+		const auto mantissa_nonzero = EmitCompareU32Constant(state, OpINotEqual, mantissa_bits, 0);
+		cls.nan                     = EmitLogicalAndBool(state, exponent_max, mantissa_nonzero);
+	}
 	cls.zero = EmitCompareU32Constant(state, OpIEqual, abs_bits, 0);
 	return cls;
 }

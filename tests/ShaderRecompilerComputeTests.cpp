@@ -32128,7 +32128,7 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   // The opt-in translation features the cases check (Frontend::TranslatorFeatureClampNanZero and the others):
   // on, unless the environment sets one (KYTY_CLAMP_NAN_ZERO=0 runs the cases without it).
-  for (const char *name : {"KYTY_CLAMP_NAN_ZERO"}) {
+  for (const char *name : {"KYTY_CLAMP_NAN_ZERO", "KYTY_NAN_ONE_COMPARE"}) {
     if (std::getenv(name) == nullptr) {
 #ifdef _WIN32
       _putenv_s(name, "1");
