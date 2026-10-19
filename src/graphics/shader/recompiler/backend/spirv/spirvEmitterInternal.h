@@ -770,6 +770,10 @@ void EmitDeviceAtomicMemoryBarrier(EmitterState& state);
 uint32_t EmitFloatAtomicReplacement(EmitterState& state, uint32_t old, uint32_t source,
                                     bool max_value);
 
+// DS_MIN_F32 / DS_MAX_F32's new value from the old one and their data (IR::Program::ds_float_minmax_data0).
+uint32_t EmitDsFloatAtomicReplacement(EmitterState& state, uint32_t old, uint32_t source,
+                                      bool max_value);
+
 uint32_t EmitDsSwizzleTargetLane(EmitterState& state, uint32_t subid, uint32_t control);
 
 uint32_t EmitSelectValueU32(EmitterState& state, uint32_t cond, uint32_t true_value,

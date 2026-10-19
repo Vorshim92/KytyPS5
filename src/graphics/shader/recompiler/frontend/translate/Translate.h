@@ -72,6 +72,7 @@ constexpr uint32_t TranslatorFeatures = TranslatorFeatureCooperativeHalves | Tra
 constexpr uint32_t TranslatorFeatureClampNanZero     = 4u;  // the f32 clamp modifier's NaN is 0 (KYTY_CLAMP_NAN_ZERO)
 constexpr uint32_t TranslatorFeatureNanOneCompare    = 8u;  // a one-comparison NaN test (KYTY_NAN_ONE_COMPARE)
 constexpr uint32_t TranslatorFeaturePkMinMaxQuietNan = 16u; // packed f16 min/max quiet NaN (KYTY_PK_MINMAX_QNAN)
+constexpr uint32_t TranslatorFeatureDsFloatMinMax    = 32u; // ds_min/max_f32 read DATA0 alone (KYTY_DS_FLOAT_MINMAX)
 // Those the translation uses (default: all of TranslatorFeatures and none of the opt-in ones; the emulator sets those
 // its static store was made with before it translates anything). KYTY_LANE_LOCAL_COOP=0/1 overrides the cooperative
 // halves either way, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads, an opt-in feature's variable that feature.

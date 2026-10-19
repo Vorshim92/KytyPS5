@@ -733,6 +733,10 @@ struct Program: ResourcePlan {
 	// V_PK_MIN_F16 / V_PK_MAX_F16 return a half quieted as a signaling NaN only with its quiet bit clear
 	// (Frontend::TranslatorFeaturePkMinMaxQuietNan): for a quiet NaN with payload bits they return the other operand.
 	bool                          pk_minmax_quiet_nan = false;
+	// DS_MIN_F32 / DS_MAX_F32 read one data operand, DATA0, and order NaNs and denorms as RDNA does
+	// (Frontend::TranslatorFeatureDsFloatMinMax: EmitDsFloatAtomicReplacement); else they store DATA0 when DATA1 compares
+	// below (above) the old value, as the ISA document's text has it.
+	bool                          ds_float_minmax_data0 = false;
 
 	std::optional<SpirvRequirements> spirv_requirements;
 };

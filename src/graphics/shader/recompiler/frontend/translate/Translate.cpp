@@ -38,8 +38,9 @@ uint32_t TranslatorFeatureSet() {
 	// (KYTY_LANE_LOCAL_COOP=0/1: the cooperative halves off or on, KYTY_TABLE_SLOTS_AT_USE=0/1 the table slots' loads
 	// at the entry or where they are read, KYTY_CLAMP_NAN_ZERO=0/1 the clamp modifier's NaN as it is or 0,
 	// KYTY_NAN_ONE_COMPARE=0/1 the NaN test as exponent and mantissa tests or one magnitude comparison,
-	// KYTY_PK_MINMAX_QNAN=0/1 the packed f16 min/max signaling NaN test without or with the quiet bit, whatever the
-	// store was made with and the GPU allows.)
+	// KYTY_PK_MINMAX_QNAN=0/1 the packed f16 min/max signaling NaN test without or with the quiet bit,
+	// KYTY_DS_FLOAT_MINMAX=0/1 ds_min/max_f32 compared with DATA1 or as RDNA does them, whatever the store was made with
+	// and the GPU allows.)
 	const auto forced = [](const char* name) {
 		const char* value = std::getenv(name);
 		return value == nullptr ? -1 : std::string_view(value) != "0" ? 1 : 0;
@@ -49,6 +50,7 @@ uint32_t TranslatorFeatureSet() {
 	static const int clamp_nan_zero      = forced("KYTY_CLAMP_NAN_ZERO");
 	static const int nan_one_compare     = forced("KYTY_NAN_ONE_COMPARE");
 	static const int pk_minmax_quiet_nan = forced("KYTY_PK_MINMAX_QNAN");
+	static const int ds_float_minmax     = forced("KYTY_DS_FLOAT_MINMAX");
 	const auto       stored       = g_translator_features.load(std::memory_order_relaxed);
 	auto             features     = (stored & g_device_features.load(std::memory_order_relaxed)) |
 	                     g_device_required.load(std::memory_order_relaxed);
@@ -60,6 +62,7 @@ uint32_t TranslatorFeatureSet() {
 	apply(clamp_nan_zero, TranslatorFeatureClampNanZero);
 	apply(nan_one_compare, TranslatorFeatureNanOneCompare);
 	apply(pk_minmax_quiet_nan, TranslatorFeaturePkMinMaxQuietNan);
+	apply(ds_float_minmax, TranslatorFeatureDsFloatMinMax);
 	return features;
 }
 
@@ -1030,10 +1033,11 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 	result.stage               = options.stage;
 	result.wave_size           = options.wave_size;
 	// The translation features the backend takes from the program (TranslatorFeatureSet).
-	const auto features        = TranslatorFeatureSet();
-	result.clamp_nan_zero      = (features & TranslatorFeatureClampNanZero) != 0;
-	result.nan_one_compare     = (features & TranslatorFeatureNanOneCompare) != 0;
-	result.pk_minmax_quiet_nan = (features & TranslatorFeaturePkMinMaxQuietNan) != 0;
+	const auto features          = TranslatorFeatureSet();
+	result.clamp_nan_zero        = (features & TranslatorFeatureClampNanZero) != 0;
+	result.nan_one_compare       = (features & TranslatorFeatureNanOneCompare) != 0;
+	result.pk_minmax_quiet_nan   = (features & TranslatorFeaturePkMinMaxQuietNan) != 0;
+	result.ds_float_minmax_data0 = (features & TranslatorFeatureDsFloatMinMax) != 0;
 	if (options.stage == ShaderType::Compute && options.wave_size == 64u) {
 		// (KYTY_LANE_LOCAL=0: every wave64 program two lanes per invocation, as before; KYTY_LANE_LOCAL_LOG: why not.)
 		static const bool enabled = [] {

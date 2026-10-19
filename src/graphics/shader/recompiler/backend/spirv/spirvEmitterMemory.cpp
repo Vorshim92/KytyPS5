@@ -1039,6 +1039,15 @@ uint32_t FloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Memo
 
 uint32_t SharedFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
                            bool max_value) {
+	if (ctx.state.program.ds_float_minmax_data0) {
+		// One data operand (DATA0), the special values as RDNA orders them.
+		const auto value = ctx.Arg(inst, 1);
+		return EmitAtomicAccess(ctx, inst, mem, [&](uint32_t pointer) {
+			return AtomicUpdate(ctx.state, pointer, mem.kind, [&](uint32_t old) {
+				return EmitDsFloatAtomicReplacement(ctx.state, old, value, max_value);
+			});
+		});
+	}
 	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto access = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
 		EmitIfCondition(
