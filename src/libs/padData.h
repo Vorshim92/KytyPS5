@@ -53,6 +53,22 @@ struct PadData {
 
 static_assert(sizeof(PadData) == 120);
 
+// scePadSetTriggerEffect's parameter: the triggers it sets (bit 0 L2, bit 1 R2) and each one's effect.
+struct PadTriggerEffectCommand {
+	uint32_t mode;
+	uint8_t  reserve[4];
+	uint8_t  data[48];
+};
+
+struct PadTriggerEffectParam {
+	uint8_t                 trigger_mask;
+	uint8_t                 reserve[7];
+	PadTriggerEffectCommand command[2];
+};
+
+static_assert(sizeof(PadTriggerEffectCommand) == 56);
+static_assert(sizeof(PadTriggerEffectParam) == 120);
+
 } // namespace Libs::Controller
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_LIBS_PADDATA_H_ */
