@@ -36,6 +36,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
 #include "debug-snapshot.h"
+#include "pad-trace.h"
 #include "perf-overlay.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
@@ -285,6 +286,12 @@ static void GameEventKeyboard(WindowLoopState& game, const EventKeyboard& key) {
 					ToggleDesktopFullscreen();
 				}
 				break;
+			// Scroll Lock: a mark in the pad trace's next row (KYTY_PAD_TRACE, src/local/pad-trace.h).
+			case SDLK_SCROLLLOCK:
+				if (!key.repeat) {
+					PadTrace::Mark();
+				}
+				break;
 			case SDLK_RETURN:
 			case SDLK_KP_ENTER:
 				if (!key.repeat && (key.mod & KMOD_ALT) != 0) {
@@ -431,6 +438,7 @@ static void GameEventController([[maybe_unused]] const EventController& f) {
 	}
 
 	if (f.axis) {
+		PadTrace::NoteAxis(f.id, f.axis_id, f.axis_value);
 		const auto axis = ControllerAxisFromSdl(f.axis_id);
 		if (axis != Controller::Axis::AxisMax) {
 			Controller::SetAxis(f.id, axis,

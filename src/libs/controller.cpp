@@ -13,6 +13,7 @@
 #include "libs/padData.h"
 #include "local/anti-lag.h"
 #include "loader/demonsSoulsWarp.h"
+#include "pad-trace.h"
 
 #include <algorithm>
 #include <array>
@@ -137,6 +138,7 @@ public:
 	int32_t GetTriggerEffectState(bool left);
 	void ReadState(ControllerState* state, bool* flag, int* count);
 	int  ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
+	int  ActiveId();
 
 private:
 	static constexpr uint32_t STATES_MAX = 64;
@@ -310,6 +312,7 @@ void Initialize() {
 
 	g_controller = new GameController;
 	g_controller->Connect(HOST_INPUT_CONTROLLER_ID);
+	PadTrace::Open();
 }
 
 void Shutdown() {
@@ -322,6 +325,7 @@ void EmergencyShutdown() {
 	if (g_controller != nullptr) {
 		g_controller->ReleaseHostPads();
 	}
+	PadTrace::Close();
 }
 
 void GameController::Connect(int id) {
@@ -728,6 +732,11 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 	return ret_num;
 }
 
+int GameController::ActiveId() {
+	Common::LockGuard lock(m_mutex);
+	return m_active_id;
+}
+
 void Connect(int id) {
 	g_controller->Connect(id);
 }
@@ -904,6 +913,10 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 
 	pad_fill_data(data, state, connected, connected_count);
 
+	if (PadTrace::On()) {
+		PadTrace::NoteRead(data, 1, 1, g_controller->ActiveId(), true);
+	}
+
 	return OK;
 }
 
@@ -925,7 +938,8 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	ControllerState states[64]      = {};
 
 	Graphics::AntiLag::Input(); // (KYTY_LOW_LATENCY on AMD: a new frame's input; the driver may wait here)
-	int ret_num = g_controller->ReadStates(states, num, &connected, &connected_count);
+	int       ret_num = g_controller->ReadStates(states, num, &connected, &connected_count);
+	const int unread  = ret_num;
 
 	if (!connected || ret_num == 0) {
 		if (connected) {
@@ -936,6 +950,10 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
+	}
+
+	if (PadTrace::On()) {
+		PadTrace::NoteRead(data, ret_num, unread, g_controller->ActiveId(), false);
 	}
 
 	return ret_num;
