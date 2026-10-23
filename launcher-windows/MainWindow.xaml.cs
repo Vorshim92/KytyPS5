@@ -62,7 +62,7 @@ partial class MainWindow : Window {
 	TextBox gamePath, extraArgs;
 	ComboBox resolution, ratio, render, upscaler, dlssModel, output, quality, frameGen, language, hud, uiLanguage, gpu;
 	CheckBox fullscreen, aspect, hdr, fps120, vsync, lowLatency, fsr, cheats, redzone, safeGpu, ecores, presentDirect, antiLag,
-		keepResident, fps30;
+		keepResident, fps30, padSpeaker;
 	TextBlock renderNote, outputNote, upscalerNote, frameGenNote, streamlineText, cheatState, bannerTitle, bannerLine, storeLine;
 	Image banner;
 	Border bannerFallback;
@@ -711,9 +711,12 @@ partial class MainWindow : Window {
 		var choose = FlatButton("button.cheats", (s, e) => ChooseCheats());
 		choose.Margin = new Thickness(16, 0, 0, 0);
 		cheatState = new TextBlock { Foreground = Res<Brush>("TextDimBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 0, 0) };
+		padSpeaker = Switch(S.Bool("pad_speaker"));
 		return Page("game.title",
 			Section("game.console"),
 			Row("language", language, Desc(T("language.desc"))),
+			Section("game.controller"),
+			Row("padspeaker", padSpeaker, Desc(T("padspeaker.desc"))),
 			Section("game.cheats"),
 			Row("cheats", Horizontal(cheats, choose, cheatState), Desc(T("cheats.desc"))));
 	}
@@ -869,6 +872,7 @@ partial class MainWindow : Window {
 		S.Set("lowlatency", lowLatency.IsChecked == true);
 		S.Set("hdr", hdr.IsChecked == true);
 		S.Set("cheats", cheats.IsChecked == true);
+		S.Set("pad_speaker", padSpeaker.IsChecked == true);
 		S.Set("safegpu", safeGpu.IsChecked == true);
 		S.Set("hud", Math.Max(0, hud.SelectedIndex));
 		S.Set(renderForDlss ? "render_dlss" : "render", SelectedRender());
@@ -916,6 +920,7 @@ partial class MainWindow : Window {
 		if (S.Bool("present_direct")) options.Add(T("summary.presentDirect"));
 		if (S.Bool("antilag")) options.Add(T("summary.antilag"));
 		if (S.Bool("keep_resident")) options.Add(T("summary.keepResident"));
+		if (!S.Bool("pad_speaker")) options.Add(T("summary.padSpeakerOff"));
 		if (S.Str("extra_args").Length != 0) options.Add(T("summary.extra"));
 
 		var parts = new List<string> {
