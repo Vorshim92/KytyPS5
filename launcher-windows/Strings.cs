@@ -116,8 +116,10 @@ static class Strings {
 		{"fsr.desc", "One generated frame between two of the game's, from its depth and motion. With VSync the shown frames are capped at the display's refresh."},
 		{"fsr.missing", "Needs AMD's amd_fidelityfx_vk.dll next to the emulator (see the README)."},
 
-		{"game.title", "Game"}, {"game.console", "Console"}, {"game.cheats", "Cheats"},
+		{"game.title", "Game"}, {"game.console", "Console"}, {"game.controller", "Controller"}, {"game.cheats", "Cheats"},
 		{"language", "Console language"}, {"language.desc", "The language the game is told; it decides which text and voices it has."},
+		{"padspeaker", "Controller speaker"},
+		{"padspeaker.desc", "The game plays some of its sounds on the DualSense's speaker, as on the console, over USB or Bluetooth. Off: the speaker stays silent and those sounds are not heard; the vibration stays."},
 		{"cheats", "Cheats"}, {"cheats.desc", "_Patches\\<title id>.json (GoldHEN style): the emulator applies the cheats left on in it."},
 		{"cheats.count", "{0} of {1} on"}, {"cheats.noFile", "No cheat file for this game"}, {"cheats.noGame", "Choose the game first"},
 
@@ -159,6 +161,7 @@ static class Strings {
 		{"feedback", "Feedback: issue #{0}"},
 		{"summary.presentDirect", "direct presentation"}, {"summary.antilag", "Anti-Lag"},
 		{"summary.keepResident", "memory kept resident"}, {"summary.fps30", "30 fps lock"},
+		{"summary.padSpeakerOff", "controller speaker off"},
 
 		{"dialog.game", "The game folder (eboot.bin, sce_sys)"},
 		{"dialog.zar", "The game folder packed into a ZArchive"},
@@ -253,8 +256,10 @@ static class Strings {
 		{"fsr.desc", "根据游戏的深度与运动，在两帧之间生成一帧。开启垂直同步时显示帧数不超过显示器刷新率。"},
 		{"fsr.missing", "需要将 AMD 的 amd_fidelityfx_vk.dll 放到模拟器旁（见说明文档）。"},
 
-		{"game.title", "游戏"}, {"game.console", "主机"}, {"game.cheats", "作弊"},
+		{"game.title", "游戏"}, {"game.console", "主机"}, {"game.controller", "手柄"}, {"game.cheats", "作弊"},
 		{"language", "主机语言"}, {"language.desc", "告诉游戏的系统语言；游戏支持哪些文字与语音由游戏决定。"},
+		{"padspeaker", "手柄扬声器"},
+		{"padspeaker.desc", "游戏会像在主机上一样，把部分声音放到 DualSense 的扬声器里（USB 或蓝牙）。关闭：扬声器保持静音，这些声音不再播放；振动不受影响。"},
 		{"cheats", "作弊"}, {"cheats.desc", "_Patches\\<title id>.json（GoldHEN 格式）：模拟器会应用其中开启的作弊项。"},
 		{"cheats.count", "已开启 {0}/{1} 项"}, {"cheats.noFile", "本游戏没有作弊文件"}, {"cheats.noGame", "请先选择游戏"},
 
@@ -296,6 +301,7 @@ static class Strings {
 		{"feedback", "反馈：issue #{0}"},
 		{"summary.presentDirect", "直接呈现"}, {"summary.antilag", "Anti-Lag"},
 		{"summary.keepResident", "常驻内存"}, {"summary.fps30", "锁定 30 帧"},
+		{"summary.padSpeakerOff", "手柄扬声器关闭"},
 
 		{"dialog.game", "游戏文件夹（eboot.bin、sce_sys）"},
 		{"dialog.zar", "打包为 ZArchive 的游戏文件夹"},
