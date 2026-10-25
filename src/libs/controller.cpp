@@ -379,6 +379,17 @@ void GameController::CheckActive() {
 	}
 	m_active_id     = new_active_id;
 	m_connected     = new_connected;
+	// (Pad trace build: which pad the game reads, among the ones connected.)
+	for (const auto id: m_connected_ids) {
+		auto*       pad    = id >= 0 ? SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(id)) : nullptr;
+		const char* name   = pad != nullptr ? SDL_GameControllerName(pad) : nullptr;
+		const char* path   = pad != nullptr ? SDL_GameControllerPath(pad) : nullptr;
+		const char* serial = pad != nullptr ? SDL_GameControllerGetSerial(pad) : nullptr;
+		std::printf("Pad: connected id %d%s: %s, type %d, path %s, serial %s\n", id, id == m_active_id ? " (the game's)" : "",
+		            name != nullptr ? name : "-", pad != nullptr ? static_cast<int>(SDL_GameControllerGetType(pad)) : -1,
+		            path != nullptr ? path : "-", serial != nullptr ? serial : "-");
+	}
+	std::fflush(stdout);
 	m_state         = {};
 	m_states_num    = 0;
 	m_first_state   = 0;
